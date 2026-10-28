@@ -1,0 +1,105 @@
+# 인프라 — Tauri 데스크톱 셸
+
+AI Style Studio 는 **Tauri 2 + React 19 + Vite 7** 데스크톱 앱이다. 프런트엔드는 Vite 로 번들되어 `../dist` 에 빌드되고, Rust 셸(`src-tauri`)이 이를 웹뷰로 감싼다. Rust 백엔드는 최소한이며 커맨드는 **MCP 등록용(`mcp_commands::*`)뿐**이다(`wiki/infra/mcp.md`). 로그인/인증 게이트는 없다(v1.0.0에서 Google OAuth 제거). 나머지 네이티브 기능(파일시스템·다이얼로그·HTTP·스토어·업데이터·오프너)은 전부 공식 Tauri 플러그인으로 처리한다. 앱 버전은 **`package.json` + `tauri.conf.json` + `Cargo.toml` 3곳을 항상 동일하게** 맞춰야 하며, `scripts/bump-version.sh` 가 이를 일괄 갱신한다.
+
+## 관련 파일
+
+### Rust 셸
+- `src-tauri/src/main.rs` — 엔트리. `ai_style_studio_lib::run()` 호출. 릴리스 빌드에서 `windows_subsystem = "windows"`(콘솔 창 억제)
+- `src-tauri/src/lib.rs` — `run()`. Tauri 빌더에 플러그인 등록 + `invoke_handler`(`mcp_commands::*`)
+- `src-tauri/Cargo.toml` — Rust 의존성·버전. lib 이름 `ai_style_studio_lib`. `tiny_http` 는 MCP 런타임 테스트용 dev-dependency
+
+### 설정
+- `src-tauri/tauri.conf.json` — 앱 메타·윈도우·번들·업데이터 설정. identifier `com.zzamjak.ai-style-studio`
+- `src-tauri/tauri.local.conf.json` — 로컬 빌드 오버라이드(`createUpdaterArtifacts: false`)
+- `src-tauri/capabilities/default.json` — 메인 윈도우 권한(퍼미션) 정의
+- `vite.config.ts` — Vite. 고정 포트 **1420**(`strictPort`), `src-tauri` 감시 제외
+- `package.json` — 프런트 의존성·스크립트·버전
+
+### 스크립트
+- `scripts/bump-version.sh` — 3파일 버전 동기 + CHANGELOG + 커밋/태그
+- `scripts/free-dev-port.mjs` — dev 포트(1420)를 붙잡은 좀비 vite 정리. `predev` 훅으로 자동 실행
+- `scripts/ci/append_tauri_signing_env.py` — CI 서명키 주입
+- `.github/workflows/release.yml` — 태그 push 시 빌드·서명·`latest.json` 배포
+
+## dev 포트 1420 — 좀비 vite 자동 정리
+
+`vite.config.ts`가 `strictPort: true`이고 `tauri.conf.json`의 `devUrl`이 `http://localhost:1420` 고정이라, **포트가 막히면 dev 서버가 다른 포트로 비켜 가지 못하고 그냥 죽는다.**
+
+문제는 실패가 실패를 부른다는 것이다. `tauri dev`의 `beforeDevCommand`(= `npm run dev`)가 포트 충돌로 죽으면 tauri는 중단되는데, 그 사이 떠 있던 vite는 **부모(`cmd /c vite`)만 죽고 자식 `node vite.js`가 살아남아** 포트를 계속 물고 있다. 그래서 실패할 때마다 좀비가 하나씩 쌓이고, 매번 PID를 직접 찾아 죽여야 했다.
+
+`predev` 훅이 이걸 자동으로 정리한다. **npm 라이프사이클 훅이라 `npm run dev`와, 그걸 `beforeDevCommand`로 부르는 `npm run tauri:dev` 양쪽에서 자동으로 먼저 돈다** — 스크립트를 두 곳에 걸 필요가 없다. 수동 실행은 `npm run dev:free-port`.
+
+### 구현에서 걸린 두 가지
+
+1. **`netstat -ano -p TCP`를 쓰면 안 된다.** 그 필터는 IPv4만 보여주는데, vite는 `host` 옵션이 없으면 **IPv6 루프백(`[::1]`)에만 바인딩**한다. 실제로 이것 때문에 스크립트가 좀비를 못 찾고 조용히 통과했다. 필터 없이 `netstat -ano`로 받아 프로토콜 열로 직접 거른다. (Windows 상태 문자열은 로케일에 따라 번역될 수 있어 `LISTENING`으로 거르지 않고, 리스닝 소켓만 갖는 성질인 **원격 주소가 비어 있는지**로 판별한다.)
+2. **아무거나 죽이지 않는다.** 프로세스 이름이 node 계열일 때만 종료하고, 다른 앱이 1420을 쓰고 있으면 경고만 남기고 통과시킨다. 그리고 어떤 실패에도 **항상 exit 0** — 포트 정리에 실패하는 것보다 dev가 아예 안 뜨는 게 나쁘다.
+
+> 이미 dev 서버를 띄워 둔 상태에서 또 실행하면 **먼저 뜬 쪽이 종료된다.** 예전에도 두 번째가 포트 충돌로 실패했으므로 동시에 두 개가 살아 있던 적은 없고, 이제 나중 것이 이긴다.
+
+## 기술 스택
+
+| 영역 | 스택 |
+|------|------|
+| 셸 | Tauri 2 (`tauri`, `tauri-build`) |
+| 프런트 | React 19, TypeScript 5.8, Vite 7 |
+| 상태관리 | Zustand 5 |
+| 스타일 | Tailwind CSS 3.4 (+`@tailwindcss/typography`) |
+| 캔버스 | Konva 10 / react-konva 19 |
+| AI | `@google/generative-ai` (Gemini) |
+| 로컬 저장 | `idb`(IndexedDB) + `@tauri-apps/plugin-store` |
+| 아이콘 | `lucide-react` |
+| 파일 파싱 | `pdfjs-dist`, `xlsx` |
+
+## Tauri 플러그인 (lib.rs:5-14)
+
+`lib.rs` 의 빌더에 등록된 플러그인. 각각 프런트에서 `@tauri-apps/plugin-*` 로 호출한다.
+
+| 플러그인 | 용도 |
+|----------|------|
+| `opener` | 시스템 브라우저/파일탐색기 열기(외부 링크, 결과 폴더) |
+| `store` | `settings.json` 등 KV 영속화(API 키·창 상태) |
+| `dialog` | 파일 열기/저장/메시지 다이얼로그 |
+| `fs` | 파일 읽기/쓰기(생성 이미지 저장) |
+| `http` | 외부 API 호출(OpenRouter) |
+| `updater` | 인앱 자동 업데이트(`wiki/infra/auto-update.md`) |
+| `process` | 업데이트 후 `relaunch()` |
+
+## 윈도우·보안 (tauri.conf.json)
+
+- 메인 윈도우: 1400×900, **`maximized: true`**(시작 시 최대화), resizable, decorations 있음 (`tauri.conf.json:12-26`)
+- `security.csp: null` — CSP 미설정 (`tauri.conf.json:28`)
+
+## 권한 모델 (capabilities/default.json)
+
+메인 윈도우에 부여된 퍼미션. 파일시스템은 `$DOWNLOAD`·`$APPDATA`·`$APPLOCALDATA` 스코프로 열려 있고 `read/write` 는 `**` 전역 허용(`default.json:64-85`). HTTP 는 아래 오리진으로 제한(`default.json:90-100`):
+- `https://openrouter.ai/*` (OpenRouter — 모든 AI 호출)
+
+`opener:allow-open-path` 는 `$DOWNLOAD/AI_Gen` 이하만 허용(`default.json:15-28`).
+
+## 빌드 / 실행
+
+```bash
+npm run tauri:dev          # 개발 (Vite 1420 + Tauri 웹뷰)
+npm run tauri:build        # 프로덕션 (업데이터 아티팩트 생성)
+npm run tauri:build:local  # 로컬 빌드 (업데이터 아티팩트 미생성)
+```
+
+- `beforeDevCommand: npm run dev`, `beforeBuildCommand: npm run build`(`tsc && vite build`) (`tauri.conf.json:7-9`)
+- `frontendDist: ../dist` — Vite 산출물을 셸이 로드 (`tauri.conf.json:10`)
+- macOS 서명 identity `"-"`(ad-hoc). CI 서명은 `release.yml` + `append_tauri_signing_env.py`
+
+## 진입 구조
+
+`main.tsx` → `<App/>` 를 바로 렌더링한다(인증 게이트 없음). `App` 은 최상위를 `<ErrorBoundary>` 로 감싼다(`src/App.tsx:1060`). 인앱 업데이트 모달·설정 모달도 `App` 에서 렌더링(`src/App.tsx:1512`).
+
+## 회귀 증상별 원인
+
+| 증상 | 원인 |
+|------|------|
+| dev 서버 포트 충돌로 실행 실패 | Vite `strictPort: true`(1420 고정) — 점유 프로세스 종료 필요 (`vite.config.ts:16-18`) |
+| OpenRouter 호출이 CSP/권한 차단 | `capabilities/default.json` HTTP allow 목록에 오리진 누락 |
+| 결과 폴더 "열기" 실패 | `opener:allow-open-path` 스코프(`$DOWNLOAD/AI_Gen`) 밖 경로 |
+| 업데이트 확인은 되는데 설치 안 됨 | 로컬 빌드(`tauri.local.conf.json`)는 업데이터 아티팩트 미생성 |
+| 버전 표시 불일치 | 3파일 중 하나만 수정 — `bump-version.sh` 로 일괄 갱신 |
+| 릴리스 콘솔 창 뜸 | `main.rs:2` `windows_subsystem` 지시자 제거됨 |

@@ -1,0 +1,261 @@
+import { useState, useCallback } from 'react';
+import { Session } from '../types/session';
+import { ChatMessage } from '../types/chat';
+import { ReferenceDocument } from '../types/referenceDocument';
+import { logger } from '../lib/logger';
+import { loadImage } from '../lib/imageStorage';
+import { GEMINI_FLASH_TEXT_MODEL } from '../types/constants';
+import { chatComplete, generateImageViaOpenRouter } from '../lib/api/openrouter';
+import { getImageModelDefinition, normalizeImageModelId, normalizeImageQuality } from './api/imageModels';
+import { convertBase64ToJpeg, formatImageApiError } from './api/useImageGenerator';
+import { buildChatConversationContext, buildChatSettingsPrefix, composeChatPrompt } from '../lib/prompts/chatPrompt';
+import { pixelateDataUrl } from '../lib/pixelart/pixelate';
+import { detectImageFormat } from '../lib/utils/imageDataUrl';
+
+// 최대 재시도 횟수
+const MAX_RETRIES = 2;
+// 재시도 대기 시간 (ms)
+const RETRY_DELAY = 5000;
+// 참조 이미지 상한 (OpenRouter input_references 한도)
+/** 참조 이미지 상한 폴백 — 실제 상한은 모델별 `supports.maxReferenceImages`를 쓴다 */
+const FALLBACK_MAX_REFERENCES = 14;
+
+interface GenerationResult {
+  content: string;
+  images: string[];
+  imageSignatures: string[]; // 레거시 필드 — OpenRouter 전환 후 항상 빈 배열 (저장 포맷 호환용)
+  isGeneratedImage: boolean;
+}
+
+interface UseChatImageGenerationReturn {
+  isGenerating: boolean;
+  generationStatus: string;
+  generateFromChat: (userMessage: string, userImages?: string[], userDocuments?: ReferenceDocument[]) => Promise<GenerationResult>;
+  summarizeMessages: (messages: ChatMessage[], existingSummary?: string) => Promise<string>;
+}
+
+export function useChatImageGeneration(
+  session: Session,
+  apiKey: string
+): UseChatImageGenerationReturn {
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generationStatus, setGenerationStatus] = useState('');
+  const chatData = session.chatData;
+
+  // 요약 + 최근 대화 텍스트를 프롬프트 컨텍스트로 결합 (MCP 편집 체인과 공유 — lib/prompts/chatPrompt.ts)
+  const buildConversationContext = useCallback((): string => {
+    const startIndex = (chatData?.summarizedUpTo ?? -1) + 1;
+    return buildChatConversationContext(chatData?.summary, chatData?.messages?.slice(startIndex) ?? []);
+  }, [chatData]);
+
+  // 직전 생성 이미지를 참조로 복원 (이어지는 편집이 직전 결과를 기준으로 하도록)
+  const resolveLatestGeneratedImage = useCallback(async (): Promise<string | null> => {
+    const startIndex = (chatData?.summarizedUpTo ?? -1) + 1;
+    const messages = chatData?.messages?.slice(startIndex) ?? [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.role === 'summary' || !msg.isGeneratedImage) continue;
+      const img = msg.images?.[msg.images.length - 1];
+      if (!img) continue;
+      if (img.startsWith('data:')) return img;
+      return (await loadImage(img)) ?? null;
+    }
+    return null;
+  }, [chatData]);
+
+  // 채팅 기반 이미지 생성 (OpenRouter Image API)
+  const generateFromChat = useCallback(async (
+    userMessage: string,
+    userImages?: string[],
+    userDocuments?: ReferenceDocument[]
+  ): Promise<GenerationResult> => {
+    setIsGenerating(true);
+    setGenerationStatus('응답 생성 중...');
+
+    const settings = chatData?.settings;
+    const imageModel = normalizeImageModelId(settings?.imageModel);
+    const modelDef = getImageModelDefinition(imageModel);
+    if (!apiKey) {
+      setIsGenerating(false);
+      setGenerationStatus('');
+      throw new Error('OpenRouter API 키가 설정되지 않았습니다.');
+    }
+    const aspectRatio = settings?.aspectRatio ?? '1:1';
+    const imageSize = settings?.imageSize ?? '1K';
+    const imageQuality = settings?.imageQuality ?? 'medium';
+
+    // 대화 맥락 + 그리드·픽셀 prefix + 문서 요약 + 사용자 메시지 (MCP 편집 체인과 공유)
+    const effectiveUserMessage = composeChatPrompt({
+      conversationContext: buildConversationContext(),
+      settingsPrefix: buildChatSettingsPrefix(settings),
+      userMessage,
+      documents: userDocuments,
+    });
+    const documentImages = (userDocuments ?? []).flatMap((d) => d.extractedImages ?? []);
+
+    // 참조 이미지: 직전 생성 이미지(기준 이미지) + 사용자 첨부 + 문서 추출 이미지
+    const latestGenerated = await resolveLatestGeneratedImage();
+    /*
+      같은 이미지를 두 번 보내지 않는다. 부분 편집은 원본을 명시적으로 첨부하는데, 그 원본이
+      보통 `latestGenerated`와 같은 데이터라 그대로 두면 동일 이미지가 참조에 중복으로 들어간다
+      (토큰만 늘고 모델에는 "비슷한 그림 두 장"이라는 잡음이 된다).
+      저장소에서 복원된 사본은 문자열이 달라 걸러지지 않을 수 있다 — 그건 감수한다.
+    */
+    const allImages = Array.from(
+      new Set([
+        ...(latestGenerated ? [latestGenerated] : []),
+        ...(userImages ?? []),
+        ...documentImages,
+      ])
+    ).slice(0, modelDef.supports.maxReferenceImages ?? FALLBACK_MAX_REFERENCES);
+
+    logger.debug('🎨 Chat 이미지 생성 요청:', {
+      imageModel,
+      aspectRatio,
+      imageSize,
+      referenceCount: allImages.length,
+      pixelArtGrid: settings?.pixelArtGrid,
+      pixelArtMode: !!settings?.pixelArtMode,
+      prefixApplied: !!buildChatSettingsPrefix(settings),
+    });
+
+    let lastError: Error | null = null;
+
+    try {
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          if (attempt > 0) {
+            setGenerationStatus(`재시도 중... (${attempt}/${MAX_RETRIES})`);
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+          }
+
+          setGenerationStatus(`${modelDef.label} 모델이 이미지를 생성하고 있습니다...`);
+
+          const generated = await generateImageViaOpenRouter(apiKey, {
+            model: imageModel,
+            prompt: effectiveUserMessage,
+            aspectRatio,
+            resolution: modelDef.provider === 'gemini' ? imageSize : undefined,
+            quality: modelDef.provider === 'openai' ? normalizeImageQuality(imageModel, imageQuality) : undefined,
+            inputReferences: allImages.length > 0 ? allImages : undefined,
+          });
+
+          /*
+            픽셀아트 모드는 JPEG 변환을 건너뛴다 — 손실 압축이 픽셀 경계에 링잉을 만들어
+            방금 세운 칼같은 경계를 다시 뭉갠다. 정규화 결과를 PNG로 그대로 넘긴다.
+            (저장 확장자는 ChatPanel이 실제 바이트를 보고 결정한다)
+          */
+          if (settings?.pixelArtMode) {
+            setGenerationStatus('픽셀 정규화 중...');
+            const rawFormat = detectImageFormat(`data:image/png;base64,${generated.base64}`);
+            const rawDataUrl = `data:image/${rawFormat === 'jpg' ? 'jpeg' : rawFormat};base64,${generated.base64}`;
+
+            try {
+              const pixelated = await pixelateDataUrl(rawDataUrl, {
+                size: settings.pixelateSize ?? 'auto',
+                paletteSize: settings.pixelatePaletteSize ?? 'auto',
+                grid: settings.pixelArtGrid,
+              });
+              logger.debug(
+                `✅ 채팅 픽셀 정규화 완료: ${pixelated.logicalWidth}x${pixelated.logicalHeight} ` +
+                `· ${pixelated.paletteSize}색 · x${pixelated.scale} 확대 (격자 정합 ${pixelated.gridScore.toFixed(2)})`
+              );
+
+              setIsGenerating(false);
+              setGenerationStatus('');
+              return {
+                content: '',
+                images: [pixelated.dataUrl],
+                imageSignatures: [],
+                isGeneratedImage: true,
+              };
+            } catch (pixelateError) {
+              // 정규화 실패 시에도 PNG 원본을 넘긴다 (JPEG로 되돌리면 픽셀이 더 망가진다)
+              logger.error('❌ 채팅 픽셀 정규화 실패:', pixelateError);
+              setIsGenerating(false);
+              setGenerationStatus('');
+              return {
+                content: '',
+                images: [rawDataUrl],
+                imageSignatures: [],
+                isGeneratedImage: true,
+              };
+            }
+          }
+
+          // 내부 표준 JPEG로 통일 (자동 저장/썸네일 파이프라인 호환)
+          const jpegBase64 = await convertBase64ToJpeg(generated.base64, generated.mediaType);
+
+          setIsGenerating(false);
+          setGenerationStatus('');
+          return {
+            content: '',
+            images: [`data:image/jpeg;base64,${jpegBase64}`],
+            imageSignatures: [],
+            isGeneratedImage: true,
+          };
+        } catch (error) {
+          const message = (error as Error).message ?? String(error);
+          const statusMatch = message.match(/\((\d{3})\)/);
+          const status = statusMatch ? parseInt(statusMatch[1], 10) : 0;
+
+          if (status >= 500 && attempt < MAX_RETRIES) {
+            logger.warn(`⚠️ 서버 에러 (${status}), 재시도 예정...`);
+            lastError = error as Error;
+            continue;
+          }
+
+          // 사용자 친화적 메시지로 변환
+          if (status > 0 && status < 500) {
+            throw new Error(formatImageApiError(status, message.replace(/^.*?\):\s*/, '')));
+          }
+          throw error;
+        }
+      }
+    } catch (error) {
+      setIsGenerating(false);
+      setGenerationStatus('');
+      throw error;
+    }
+
+    setIsGenerating(false);
+    setGenerationStatus('');
+    throw lastError || new Error('이미지 생성에 실패했습니다.');
+  }, [apiKey, chatData, buildConversationContext, resolveLatestGeneratedImage]);
+
+  // 메시지 요약 (Gemini Flash · chat completions)
+  const summarizeMessages = useCallback(async (
+    messagesToSummarize: ChatMessage[],
+    existingSummary?: string
+  ): Promise<string> => {
+    if (!apiKey) throw new Error('OpenRouter API 키가 설정되지 않았습니다.');
+
+    const conversationText = messagesToSummarize
+      .filter(m => m.role !== 'summary')
+      .map(m => {
+        const role = m.role === 'user' ? '사용자' : 'AI';
+        const imageNote = m.images?.length ? ` [이미지 ${m.images.length}개 포함]` : '';
+        return `${role}: ${m.content}${imageNote}`;
+      })
+      .join('\n');
+
+    const prompt = existingSummary
+      ? `다음은 이전 대화 요약과 이후 추가된 대화입니다. 전체 맥락을 하나의 요약으로 통합해주세요.\n\n[이전 요약]\n${existingSummary}\n\n[추가 대화]\n${conversationText}\n\n한국어로 핵심 내용을 3-5문장으로 요약해주세요. 이미지 생성 요청과 결과도 포함해주세요.`
+      : `다음 대화를 한국어로 핵심 내용 3-5문장으로 요약해주세요. 이미지 생성 요청과 결과도 포함해주세요.\n\n${conversationText}`;
+
+    try {
+      const text = await chatComplete(apiKey, {
+        model: GEMINI_FLASH_TEXT_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+      });
+
+      logger.info('📝 대화 요약 생성 완료');
+      return text;
+    } catch (error) {
+      logger.error('❌ 대화 요약 실패:', error);
+      throw error;
+    }
+  }, [apiKey]);
+
+  return { isGenerating, generationStatus, generateFromChat, summarizeMessages };
+}

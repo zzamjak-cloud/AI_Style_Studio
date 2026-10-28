@@ -1,0 +1,160 @@
+#!/bin/bash
+# StyleStudio 버전 범프 스크립트
+# 사용법: ./scripts/bump-version.sh <new-version>
+# 예시: ./scripts/bump-version.sh 0.5.0
+#
+# 수행 작업:
+#   1. package.json, tauri.conf.json, Cargo.toml 버전 업데이트
+#   2. CHANGELOG.md에 새 버전 섹션 추가 (Unreleased -> 새 버전)
+#   3. 변경사항 커밋 및 버전 태그 생성
+#   4. (선택) 태그 푸시
+
+set -euo pipefail
+
+# 색상 출력
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# 프로젝트 루트 디렉토리로 이동
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_ROOT"
+
+# 인자 확인
+if [ $# -lt 1 ]; then
+  echo -e "${RED}오류: 버전 번호를 지정하세요.${NC}"
+  echo "사용법: $0 <new-version>"
+  echo "예시: $0 0.5.0"
+  exit 1
+fi
+
+NEW_VERSION="$1"
+
+# 버전 형식 검증 (semver)
+if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo -e "${RED}오류: 올바른 semver 형식이 아닙니다 (예: 1.2.3)${NC}"
+  exit 1
+fi
+
+# 현재 버전 확인
+CURRENT_VERSION=$(node -p "require('./package.json').version")
+echo -e "${YELLOW}현재 버전: ${CURRENT_VERSION}${NC}"
+echo -e "${GREEN}새 버전: ${NEW_VERSION}${NC}"
+echo ""
+
+# 작업 디렉토리가 깨끗한지 확인
+if [ -n "$(git status --porcelain)" ]; then
+  echo -e "${RED}오류: 커밋하지 않은 변경사항이 있습니다. 먼저 정리해주세요.${NC}"
+  git status --short
+  exit 1
+fi
+
+# 0. 원격에 없는 로컬 태그 점검.
+# 중단된 범프(태그는 만들고 푸시는 안 한 경우)가 남긴 태그가 쌓이면, 다음 릴리스에서
+# `--tags`로 함께 밀려 그 태그마다 릴리스 워크플로가 헛돌게 된다(v0.4.22/v0.4.23 사례).
+echo -e "${GREEN}[0/5] 원격에 없는 로컬 태그 점검...${NC}"
+STRAY_TAGS=$(comm -23 \
+  <(git tag | sort) \
+  <(git ls-remote --tags origin 2>/dev/null | sed -n 's#.*refs/tags/\([^^]*\)$#\1#p' | sort -u) || true)
+if [ -n "${STRAY_TAGS}" ]; then
+  echo -e "${YELLOW}경고: 원격에 없는 로컬 태그가 있습니다.${NC}"
+  echo "${STRAY_TAGS}" | sed 's/^/  - /'
+  echo -e "${YELLOW}배포하지 않을 태그라면 지우세요: git tag -d <태그>${NC}"
+  echo ""
+fi
+
+# 1. package.json 버전 업데이트
+echo -e "${GREEN}[1/5] package.json 업데이트...${NC}"
+node -e "
+  const fs = require('fs');
+  const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+  pkg.version = '${NEW_VERSION}';
+  fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+"
+
+# 2. tauri.conf.json 버전 업데이트
+echo -e "${GREEN}[2/5] tauri.conf.json 업데이트...${NC}"
+node -e "
+  const fs = require('fs');
+  const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+  conf.version = '${NEW_VERSION}';
+  fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
+"
+
+# 3. Cargo.toml 버전 업데이트
+echo -e "${GREEN}[3/5] Cargo.toml 업데이트...${NC}"
+sed -i.bak -E "s/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/version = \"${NEW_VERSION}\"/" src-tauri/Cargo.toml
+rm -f src-tauri/Cargo.toml.bak
+
+# 3-1. Cargo.lock의 자기 패키지 버전도 맞춘다.
+# 안 맞추면 다음 cargo build가 Cargo.lock을 고쳐 작업 트리가 더러워진다.
+node -e "
+  const fs = require('fs');
+  const path = 'src-tauri/Cargo.lock';
+  const lock = fs.readFileSync(path, 'utf8');
+  const next = lock.replace(
+    /(name = \"ai-style-studio\"\r?\nversion = \")[0-9]+\.[0-9]+\.[0-9]+/,
+    '\$1${NEW_VERSION}'
+  );
+  if (next === lock) {
+    console.error('Cargo.lock의 ai-style-studio 버전을 갱신하지 못했습니다.');
+    process.exit(1);
+  }
+  fs.writeFileSync(path, next);
+"
+
+# 4. CHANGELOG.md 업데이트 (Unreleased -> 새 버전)
+echo -e "${GREEN}[4/5] CHANGELOG.md 업데이트...${NC}"
+TODAY=$(date +%Y-%m-%d)
+
+# Unreleased 섹션을 새 버전으로 변환하고 빈 Unreleased 섹션 추가
+node -e "
+  const fs = require('fs');
+  let changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
+
+  // '## [Unreleased]' 바로 아래에 내용이 있으면 새 버전 헤더로 이동.
+  // CRLF(\r\n)도 받아야 한다 — Windows 체크아웃에서 \n만 찾으면 매치에 실패해
+  // CHANGELOG가 **조용히 갱신되지 않은 채** 릴리스 커밋이 만들어진다(v0.5.2에서 발생).
+  const unreleasedPattern = /## \[Unreleased\]\r?\n/;
+  if (!unreleasedPattern.test(changelog)) {
+    console.error('CHANGELOG.md에서 [Unreleased] 섹션을 찾지 못했습니다.');
+    process.exit(1);
+  }
+  const eol = changelog.includes('\r\n') ? '\r\n' : '\n';
+  const newSection = '## [Unreleased]' + eol + eol + '## [${NEW_VERSION}] - ${TODAY}' + eol;
+  changelog = changelog.replace(unreleasedPattern, newSection);
+
+  fs.writeFileSync('CHANGELOG.md', changelog);
+"
+
+# 5. 커밋 및 태그 생성
+echo -e "${GREEN}[5/5] 커밋 및 태그 생성...${NC}"
+git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock CHANGELOG.md
+git commit -m "chore: bump version to v${NEW_VERSION}"
+git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
+
+echo ""
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN} 버전 범프 완료: v${NEW_VERSION}${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo ""
+echo "변경된 파일:"
+echo "  - package.json"
+echo "  - src-tauri/tauri.conf.json"
+echo "  - src-tauri/Cargo.toml"
+echo "  - src-tauri/Cargo.lock"
+echo "  - CHANGELOG.md"
+echo ""
+echo -e "${YELLOW}다음 단계:${NC}"
+echo "  1. CHANGELOG.md의 [${NEW_VERSION}] 섹션에 변경 내역을 작성하세요."
+echo "  2. 작성 완료 후: git add CHANGELOG.md && git commit --amend --no-edit"
+echo "  3. 원격에 푸시: git push origin main && git push origin v${NEW_VERSION}"
+echo ""
+echo -e "${YELLOW}또는 CHANGELOG가 이미 작성되어 있다면:${NC}"
+echo "  git push origin main && git push origin v${NEW_VERSION}"
+echo ""
+echo -e "${YELLOW}주의: \`--tags\`로 푸시하지 마세요.${NC}"
+echo "  릴리스 워크플로가 v* 태그 push에 반응하므로, 원격에 없는 구버전 로컬 태그까지"
+echo "  함께 밀리면 그 태그마다 릴리스 빌드가 트리거됩니다. 새 태그만 지정해 푸시하세요."

@@ -1,0 +1,58 @@
+import { AspectRatioOption } from '../hooks/api/imageModels';
+import { ImageAnalysisResult } from './analysis';
+import { PixelArtGridLayout } from './pixelart';
+import { PaletteSizeOption, PixelateSizeOption } from '../lib/pixelart/pixelate';
+import { ReferenceDocument } from './referenceDocument';
+import { IllustrationSessionData } from './illustration';
+import { ChatSessionData } from './chat';
+import { ConceptSessionData } from './concept';
+import { TilemapSessionData } from './tilemap';
+export type SessionType = 'BASIC' | 'STYLE' | 'CHARACTER' | 'BACKGROUND' | 'ICON' | 'PIXELART_CHARACTER' | 'PIXELART_BACKGROUND' | 'PIXELART_ICON' | 'UI' | 'LOGO' | 'ILLUSTRATION' | 'CONCEPT' | 'TILEMAP';
+
+export interface Session {
+  id: string;
+  name: string;
+  type: SessionType;
+  createdAt: string;
+  updatedAt: string;
+  referenceImages: string[]; // Base64 data URL 배열 (레거시) 또는 IndexedDB 키 배열 (신규)
+  imageKeys?: string[]; // IndexedDB 키 배열 (신규 방식, 있으면 우선 사용)
+  analysis: ImageAnalysisResult;
+  imageCount: number; // 참조 이미지 개수
+  generationHistory?: GenerationHistoryEntry[]; // 생성 히스토리 (선택)
+  /** @deprecated v0.4.4 이후 사용 안 함. 저장 경로는 자동으로 ~/Downloads/AI_Gen/{세션명}/ */
+  autoSavePath?: string;
+  referenceDocuments?: ReferenceDocument[]; // 참조 문서 (UI 세션 전용)
+  folderId?: string | null; // 소속 폴더 ID (null/undefined면 루트)
+  illustrationData?: IllustrationSessionData; // 일러스트 세션 전용 데이터
+  chatData?: ChatSessionData; // BASIC 채팅 세션 전용 데이터
+  conceptData?: ConceptSessionData; // CONCEPT 세션 전용 데이터
+  tilemapData?: TilemapSessionData; // TILEMAP 세션 전용 데이터
+}
+
+// 생성 히스토리 엔트리
+export interface GenerationHistoryEntry {
+  id: string; // UUID
+  timestamp: string; // ISO 8601
+  prompt: string; // 사용된 프롬프트
+  negativePrompt?: string; // 사용된 네거티브 프롬프트
+  additionalPrompt?: string; // 추가 포즈/동작 프롬프트 (원본 한글 또는 영어)
+  imageBase64: string; // 생성된 이미지 (Base64)
+  settings: GenerationSettings; // 사용된 설정
+  isPinned?: boolean; // 즐겨찾기 표시
+  referenceDocumentIds?: string[]; // 참조 문서 ID 목록 (UI 세션 전용)
+}
+
+// 생성 설정
+export interface GenerationSettings {
+  aspectRatio: AspectRatioOption;
+  imageSize: '1K' | '2K' | '4K';
+  useReferenceImages: boolean;
+  pixelArtGrid?: PixelArtGridLayout; // 스프라이트 그리드 레이아웃 (1x1, 2x2, 4x4, 6x6, 8x8)
+  cameraAngle?: string; // 카메라 앵글 프리셋 ID
+  cameraLens?: string;  // 카메라 렌즈/화각 프리셋 ID
+  thinkingMode?: boolean; // GPT-Image-2 / Gemini 추론 기반 생성 prefix 적용 여부 (베타)
+  pixelate?: boolean; // 픽셀 정규화 적용 여부 (픽셀아트 세션 전용)
+  pixelateSize?: PixelateSizeOption; // 논리 해상도 ('auto' | 32 | 64 | 128)
+  pixelatePaletteSize?: PaletteSizeOption; // 팔레트 색 수 ('auto' | 8 | 16 | 32 | 48)
+}

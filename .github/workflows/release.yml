@@ -1,0 +1,306 @@
+# AI Style Studio 릴리스 워크플로우
+# - 태그 푸시 시: 그 태그가 가리키는 *커밋*의 이 파일이 실행됩니다 (main 최신과 무관할 수 있음).
+# - 서명/CI 수정만 반영해 재빌드하려면: main에 수정을 푸시한 뒤 (a) 새 패치 태그를 밀거나
+#   (b) Actions → 이 워크플로 → Run workflow에서 동일 태그로 수동 실행하세요.
+
+name: Release AI Style Studio
+
+on:
+  push:
+    tags:
+      - 'v*'  # v1.0.0 형식의 태그에 반응
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '빌드할 릴리스 태그 (저장소에 이미 존재해야 함, 예 v0.4.11). 워크플로는 실행 시 브랜치(main)의 최신 YAML을 사용합니다.'
+        required: true
+        type: string
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # 태그 이벤트: ref 이름 / 수동 실행: 입력한 태그
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  # 릴리스를 먼저 생성하여 병렬 빌드의 race condition 방지
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
+      - name: Extract changelog for current version
+        id: changelog
+        run: |
+          TAG="${RELEASE_TAG}"
+          VERSION="${TAG#v}"
+
+          # CHANGELOG.md에서 현재 버전 섹션 추출
+          NOTES=""
+          if [ -f CHANGELOG.md ]; then
+            NOTES=$(awk -v ver="$VERSION" '
+              /^## \[/ {
+                if (found) exit
+                if (index($0, "[" ver "]")) found=1
+                next
+              }
+              found { print }
+            ' CHANGELOG.md)
+          fi
+
+          # CHANGELOG에 해당 버전 내용이 없으면 기본 메시지 사용
+          if [ -z "$NOTES" ]; then
+            NOTES="새 버전 ${TAG}이 출시되었습니다."
+          fi
+
+          # 멀티라인 출력을 GITHUB_OUTPUT에 저장
+          {
+            echo "notes<<CHANGELOG_EOF"
+            echo "$NOTES"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create or reuse release for tag
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHANGELOG_NOTES: ${{ steps.changelog.outputs.notes }}
+        run: |
+          TAG="${RELEASE_TAG}"
+          REPO="${{ github.repository }}"
+
+          # 릴리즈 본문을 파일로 생성 (셸 해석 방지)
+          {
+            echo "## AI Style Studio ${TAG}"
+            echo ""
+            echo "$CHANGELOG_NOTES"
+            echo ""
+            echo "### 설치 방법"
+            echo "- **macOS**: \`.dmg\` 파일을 다운로드하여 Applications 폴더에 드래그"
+            echo "- **Windows**: \`.msi\` 파일을 다운로드하여 실행"
+          } > release_body.md
+
+          if ! gh release view "$TAG" --repo "$REPO" 2>/dev/null; then
+            gh release create "$TAG" \
+              --repo "$REPO" \
+              --title "AI Style Studio ${TAG}" \
+              --notes-file release_body.md
+          else
+            gh release edit "$TAG" \
+              --repo "$REPO" \
+              --notes-file release_body.md
+          fi
+          RID=$(gh api "repos/${REPO}/releases/tags/${TAG}" --jq '.id')
+          echo "release_id=${RID}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS (Apple Silicon + Intel Universal)
+          - platform: macos-latest
+            args: --target universal-apple-darwin
+          # Windows
+          - platform: windows-latest
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      # 릴리스 태그 커밋에는 scripts/ci가 없을 수 있음. 워크플로는 항상 기본 브랜치 최신 정의를 쓰므로,
+      # 서명 헬퍼만 기본 브랜치에서 덮어써 경로를 맞춘다(앱 소스는 계속 RELEASE_TAG).
+      - name: Load CI signing helper from default branch
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git fetch origin "${DEFAULT_BRANCH}" --depth=1
+          mkdir -p scripts/ci
+          git show "origin/${DEFAULT_BRANCH}:scripts/ci/append_tauri_signing_env.py" > scripts/ci/append_tauri_signing_env.py
+          test -s scripts/ci/append_tauri_signing_env.py
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install dependencies (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Base64 시크릿 → PEM 파일 → Python으로 GITHUB_ENV에 멀티라인 기록
+      # (bash `{ echo <<DELIM; cat; echo DELIM } >> GITHUB_ENV` 는 macOS 러너에서 종료 구분자 미매칭 버그가 보고됨)
+      # https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#multiline-strings
+      - name: Decode signing key
+        shell: bash
+        env:
+          STYLESTUDIO_SIGNING_KEY_BASE64: ${{ secrets.STYLESTUDIO_SIGNING_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          CLEAN_B64=$(printf '%s' "$STYLESTUDIO_SIGNING_KEY_BASE64" | tr -d '\n\r ')
+          TMPKEY="${RUNNER_TEMP:-/tmp}/stylestudio_signing.pem"
+          printf '%s' "$CLEAN_B64" | base64 -d > "$TMPKEY"
+          if [ ! -s "$TMPKEY" ]; then
+            echo "::error::Signing key decode produced empty file (check STYLESTUDIO_SIGNING_KEY_BASE64)"
+            exit 1
+          fi
+          PY="$(command -v python3 || command -v python)"
+          "$PY" scripts/ci/append_tauri_signing_env.py "$TMPKEY"
+          rm -f "$TMPKEY"
+
+      - name: Verify signing key is loaded
+        shell: bash
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is empty"
+            exit 1
+          fi
+          echo "TAURI signing key loaded (${#TAURI_SIGNING_PRIVATE_KEY} chars)"
+
+      # AI 에이전트 연동용 MCP 서버(ss-mcp, mcp/) → wiki/infra/mcp.md "배포 방식"
+      # - 앱에는 JS 번들(ss-mcp.mjs, 약 1MB)만 넣는다. 사용자 PC 의 Node 18+ 로 실행된다.
+      # - Node 가 없는 PC 용 단일 실행 파일(런타임 포함 100MB+)은 앱에 넣지 않고 릴리스 자산(.gz + .sha256)으로만 올린다.
+      #   앱이 설정 화면에서 v<앱 버전> 릴리스의 자산을 받아 해시·버전을 확인한 뒤 설치한다.
+      # 실패해도 앱 빌드는 막지 않는다(번들 누락 시 앱은 MCP 등록만 비활성화된다).
+      - name: Setup Bun (MCP server)
+        uses: oven-sh/setup-bun@v2
+        continue-on-error: true
+        with:
+          bun-version: 1.3.10
+
+      - name: Build MCP server script (bundled with app)
+        continue-on-error: true
+        shell: bash
+        run: node scripts/build-mcp.mjs && ls -lh src-tauri/binaries/
+
+      - name: Publish MCP standalone binary (macOS universal)
+        if: matrix.platform == 'macos-latest'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 임시 폴더에서 빌드·lipo·서명·검증을 모두 통과한 뒤에만 업로드한다
+          WORK="$RUNNER_TEMP/ss-mcp"
+          mkdir -p "$WORK"
+          node scripts/build-mcp.mjs --standalone --target bun-darwin-arm64 --out "$WORK/ss-mcp-arm64"
+          node scripts/build-mcp.mjs --standalone --target bun-darwin-x64 --out "$WORK/ss-mcp-x64"
+          lipo -create -output "$WORK/ss-mcp" "$WORK/ss-mcp-arm64" "$WORK/ss-mcp-x64"
+          # lipo 로 합친 뒤 ad-hoc 서명을 다시 입힌다 (사용자 PC 에서 앱 밖으로 내려받아 실행되므로 서명이 유효해야 한다)
+          codesign --force --sign - "$WORK/ss-mcp"
+          codesign -v "$WORK/ss-mcp"
+          lipo -info "$WORK/ss-mcp"
+          gzip -9 -c "$WORK/ss-mcp" > "$WORK/ss-mcp-macos-universal.gz"
+          (cd "$WORK" && shasum -a 256 ss-mcp-macos-universal.gz > ss-mcp-macos-universal.gz.sha256)
+          gh release upload "$RELEASE_TAG" "$WORK/ss-mcp-macos-universal.gz" "$WORK/ss-mcp-macos-universal.gz.sha256" --repo "${{ github.repository }}" --clobber
+
+      - name: Publish MCP standalone binary (Windows x64)
+        if: matrix.platform == 'windows-latest'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/ss-mcp"
+          mkdir -p "$WORK"
+          node scripts/build-mcp.mjs --standalone --out "$WORK/ss-mcp.exe"
+          "$WORK/ss-mcp.exe" --version
+          gzip -9 -c "$WORK/ss-mcp.exe" > "$WORK/ss-mcp-windows-x64.exe.gz"
+          (cd "$WORK" && sha256sum ss-mcp-windows-x64.exe.gz > ss-mcp-windows-x64.exe.gz.sha256)
+          gh release upload "$RELEASE_TAG" "$WORK/ss-mcp-windows-x64.exe.gz" "$WORK/ss-mcp-windows-x64.exe.gz.sha256" --repo "${{ github.repository }}" --clobber
+
+      - name: Build and Release (macOS without Apple signing)
+        if: matrix.platform == 'macos-latest'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.STYLESTUDIO_SIGNING_KEY_PASSWORD }}
+          # Apple 코드 서명 비활성화 (인증서 없음)
+          APPLE_SIGNING_IDENTITY: "-"
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          tagName: ${{ env.RELEASE_TAG }}
+          retryAttempts: 5
+          args: ${{ matrix.args }}
+
+      - name: Build and Release (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.STYLESTUDIO_SIGNING_KEY_PASSWORD }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          tagName: ${{ env.RELEASE_TAG }}
+          retryAttempts: 5
+          args: ${{ matrix.args }}
+
+  # 롤링 릴리스 업데이트 (자동 업데이트용 고정 URL)
+  update-latest:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download latest.json from versioned release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 버전 릴리스에서 latest.json 다운로드
+          gh release download "${{ env.RELEASE_TAG }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "latest.json" \
+            --dir ./artifacts
+
+      - name: Update rolling release (latest)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 기존 롤링 릴리스 삭제 (있으면)
+          gh release delete latest \
+            --repo "${{ github.repository }}" \
+            --yes || true
+
+          # 기존 태그 삭제 (있으면)
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/latest" || true
+
+          # 새 롤링 릴리스 생성
+          gh release create latest \
+            --repo "${{ github.repository }}" \
+            --title "AI Style Studio Latest (Auto-Update)" \
+            --notes "자동 업데이트용 릴리스입니다. 직접 다운로드하지 마세요. 최신 버전: ${{ env.RELEASE_TAG }}" \
+            --prerelease \
+            ./artifacts/latest.json

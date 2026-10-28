@@ -1,0 +1,45 @@
+[package]
+name = "ai-style-studio"
+version = "1.0.0"
+description = "AI 게임 아트 제작 데스크톱 애플리케이션"
+authors = ["최진평 (Jinpyoung Choi) <zzamjak@naver.com>"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/zzamjak-cloud/AI_Style_Studio"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "ai_style_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-opener = "2"
+tauri-plugin-store = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-http = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+# preserve_order: 에이전트 설정 파일(~/.claude.json 등)을 고쳐 쓸 때 키 순서를 보존한다
+serde_json = { version = "1", features = ["preserve_order"] }
+toml_edit = "0.22"
+dirs = "6"
+# Node 가 없는 PC 용 MCP 실행 파일 다운로드 (gzip 해제·SHA-256 검증) → src/mcp_runtime.rs
+ureq = "2"
+flate2 = "1"
+sha2 = "0.10"
+url = "2"
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+# MCP 런타임 다운로드 테스트용 로컬 HTTP 서버 → src/mcp_runtime.rs
+tiny_http = "0.12"

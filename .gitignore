@@ -1,0 +1,49 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Playwright MCP
+.playwright-mcp/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OMC
+.omc/
+
+# Claude local settings
+.claude/
+
+# 터미널 어시스턴트 로컬 메모
+.terminal-assistance/
+
+# 사용자 세션/폴더 내보내기 결과 (개인 데이터)
+0_Sessions/
+
+# MCP 서버 빌드 산출물 (npm run mcp:build 로 생성, 앱 번들 리소스)
+src-tauri/binaries/ss-mcp*
+# Bun --compile 중단 시 남는 임시 산출물 (100MB+)
+*.bun-build

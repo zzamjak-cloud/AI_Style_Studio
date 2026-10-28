@@ -1,0 +1,1605 @@
+import { useState, useMemo, useEffect, useCallback } from 'react';
+import { ArrowLeft, ChevronDown, HelpCircle, X, FolderOpen, ZoomIn } from 'lucide-react';
+import { save } from '@tauri-apps/plugin-dialog';
+import { writeFile } from '@tauri-apps/plugin-fs';
+import { openPath } from '@tauri-apps/plugin-opener';
+import { join } from '@tauri-apps/api/path';
+import { getAiGenRoot, getSessionImageFolder } from '../../lib/config/paths';
+import { ImageAnalysisResult } from '../../types/analysis';
+import { SessionType, GenerationHistoryEntry } from '../../types/session';
+import { ConceptSketch } from '../../types/illustration';
+import { ConceptSketchPanel } from '../illustration/conceptSketch/ConceptSketchPanel';
+import { buildSketchGuideSection, isSketchEnabledSession } from '../../lib/prompts/sketchGuide';
+import { PixelArtGridLayout } from '../../types/pixelart';
+import { ReferenceDocument } from '../../types/referenceDocument';
+import { IllustrationSessionData, ILLUSTRATION_LIMITS } from '../../types/illustration';
+import {
+  DEFAULT_TILEMAP_EDGE_STYLE,
+  DEFAULT_TILEMAP_OUTLINE,
+  DEFAULT_TILEMAP_OUTLINE2,
+  DEFAULT_TILEMAP_OUTLINE_SIDE,
+  TILEMAP_RULETILE_GRID,
+  TilemapEdgeStyle,
+  TilemapMode,
+  TilemapOutline,
+  TilemapOutlineSide,
+  TilemapSessionData,
+} from '../../types/tilemap';
+import { getCameraAnglePrompt } from '../../types/cameraAngle';
+import { getCameraLensPrompt } from '../../types/cameraLens';
+import { buildUnifiedPrompt } from '../../lib/promptBuilder';
+import {
+  buildPromptForSession,
+  TRANSPARENT_BACKGROUND_CAPABLE_SESSIONS,
+} from '../../lib/prompts/sessionPrompts';
+import {
+  PaletteSizeOption,
+  PixelateSizeOption,
+  pixelateDataUrl,
+} from '../../lib/pixelart/pixelate';
+import { useImageGenerator } from '../../hooks/api/useImageGenerator';
+import { useGeminiTranslator } from '../../hooks/api/useGeminiTranslator';
+import { useTilemapProcessing } from '../../hooks/useTilemapProcessing';
+import { logger } from '../../lib/logger';
+import { loadImage } from '../../lib/imageStorage';
+import { exportTilemapForUnity } from '../../lib/tilemap/tilemapExporter';
+import { detectImageFormat, getImageSaveFormat } from '../../lib/utils/imageDataUrl';
+import { GeneratorSettings } from './GeneratorSettings';
+import { GeneratorPreview } from './GeneratorPreview';
+import { GeneratorHistory } from './GeneratorHistory';
+import { TilemapResultView } from '../tilemap/TilemapResultView';
+import {
+  DEFAULT_IMAGE_MODEL,
+  TILEMAP_FIXED_IMAGE_MODEL,
+  getAvailableImageModels,
+  getImageModelDefinition,
+  getTilemapImageModels,
+  isTilemapCompatibleModel,
+  type ImageGenerationModel,
+  type ImageQualityOption,
+  type AspectRatioOption,
+  type ImageSizeOption,
+} from '../../hooks/api/imageModels';
+import {
+  IMAGE_GENERATION_DEFAULTS,
+  HISTORY_PANEL,
+} from '../../types/constants';
+
+// 흰색 배경 제거 대상 세션 타입 (없음 - 모든 타입 JPG 저장)
+const TRANSPARENT_BACKGROUND_SESSION_TYPES: SessionType[] = [];
+
+/**
+ * 이미지에서 흰색/밝은 배경을 투명하게 변환 (Flood Fill + Defringe 알고리즘)
+ * 이미지 가장자리에서 시작하여 연결된 흰색 영역만 제거합니다.
+ * 캐릭터 내부의 흰색(눈 하이라이트, 빛 반사 등)은 보존됩니다.
+ * Defringe 처리로 외곽의 화이트 매트(white matte)를 제거합니다.
+ *
+ * @param imageDataUrl - Base64 이미지 Data URL
+ * @param threshold - 흰색으로 간주할 RGB 임계값 (기본 240)
+ * @returns 투명 배경이 적용된 PNG Data URL
+ */
+async function removeWhiteBackground(imageDataUrl: string, threshold: number = 240): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        // Canvas 생성
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+
+        if (!ctx) {
+          reject(new Error('Canvas 2D context를 생성할 수 없습니다'));
+          return;
+        }
+
+        // 이미지 그리기
+        ctx.drawImage(img, 0, 0);
+
+        // 픽셀 데이터 가져오기
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        const width = canvas.width;
+        const height = canvas.height;
+
+        // 픽셀이 흰색인지 확인하는 함수
+        const isWhitePixel = (index: number): boolean => {
+          const r = data[index];
+          const g = data[index + 1];
+          const b = data[index + 2];
+          return r > threshold && g > threshold && b > threshold;
+        };
+
+        // 좌표를 1차원 인덱스로 변환
+        const getIndex = (x: number, y: number): number => (y * width + x) * 4;
+
+        // 방문 여부 추적 (투명하게 만들 픽셀)
+        const toMakeTransparent = new Set<number>();
+
+        // BFS (Breadth-First Search)를 사용한 Flood Fill
+        // 이미지 가장자리의 모든 흰색 픽셀에서 시작
+        const queue: [number, number][] = [];
+        const visited = new Set<string>();
+
+        // 가장자리 픽셀들을 시작점으로 추가
+        // 상단 및 하단 가장자리
+        for (let x = 0; x < width; x++) {
+          if (isWhitePixel(getIndex(x, 0))) {
+            queue.push([x, 0]);
+            visited.add(`${x},0`);
+          }
+          if (isWhitePixel(getIndex(x, height - 1))) {
+            queue.push([x, height - 1]);
+            visited.add(`${x},${height - 1}`);
+          }
+        }
+        // 좌측 및 우측 가장자리
+        for (let y = 1; y < height - 1; y++) {
+          if (isWhitePixel(getIndex(0, y))) {
+            queue.push([0, y]);
+            visited.add(`0,${y}`);
+          }
+          if (isWhitePixel(getIndex(width - 1, y))) {
+            queue.push([width - 1, y]);
+            visited.add(`${width - 1},${y}`);
+          }
+        }
+
+        // BFS 실행
+        const directions = [
+          [-1, 0], [1, 0], [0, -1], [0, 1], // 상하좌우
+          [-1, -1], [-1, 1], [1, -1], [1, 1] // 대각선 (더 정밀한 경계 처리)
+        ];
+
+        while (queue.length > 0) {
+          const [x, y] = queue.shift()!;
+          const index = getIndex(x, y);
+
+          // 이 픽셀을 투명하게 만들 목록에 추가
+          toMakeTransparent.add(index);
+
+          // 인접 픽셀 확인
+          for (const [dx, dy] of directions) {
+            const nx = x + dx;
+            const ny = y + dy;
+            const key = `${nx},${ny}`;
+
+            // 범위 체크
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            // 이미 방문한 픽셀 건너뛰기
+            if (visited.has(key)) continue;
+
+            const nIndex = getIndex(nx, ny);
+
+            // 흰색 픽셀이면 큐에 추가
+            if (isWhitePixel(nIndex)) {
+              visited.add(key);
+              queue.push([nx, ny]);
+            }
+          }
+        }
+
+        // 1단계: 연결된 흰색 배경 픽셀을 투명하게 처리
+        for (const index of toMakeTransparent) {
+          data[index + 3] = 0; // Alpha를 0으로 설정 (완전 투명)
+        }
+
+        // 2단계: 거리 맵 생성 (각 픽셀이 투명 영역에서 얼마나 떨어져 있는지)
+        const distanceMap = new Map<number, number>(); // index -> distance
+
+        // BFS로 거리 계산 (투명 영역에서 시작)
+        const distanceQueue: [number, number, number][] = []; // [x, y, distance]
+        const distanceVisited = new Set<string>();
+
+        // 투명 영역과 인접한 불투명 픽셀을 시작점으로
+        for (const transparentIndex of toMakeTransparent) {
+          const pixelIndex = transparentIndex / 4;
+          const x = pixelIndex % width;
+          const y = Math.floor(pixelIndex / width);
+
+          for (const [dx, dy] of directions) {
+            const nx = x + dx;
+            const ny = y + dy;
+            const key = `${nx},${ny}`;
+
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            if (distanceVisited.has(key)) continue;
+
+            const nIndex = getIndex(nx, ny);
+            if (data[nIndex + 3] > 0 && !toMakeTransparent.has(nIndex)) {
+              distanceVisited.add(key);
+              distanceQueue.push([nx, ny, 1]);
+              distanceMap.set(nIndex, 1);
+            }
+          }
+        }
+
+        // 거리 전파 (feather 범위만큼)
+        const featherRadius = 6; // Feather 반경 (픽셀)
+        while (distanceQueue.length > 0) {
+          const [x, y, dist] = distanceQueue.shift()!;
+
+          if (dist >= featherRadius) continue;
+
+          for (const [dx, dy] of directions.slice(0, 4)) { // 4방향
+            const nx = x + dx;
+            const ny = y + dy;
+            const key = `${nx},${ny}`;
+
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            if (distanceVisited.has(key)) continue;
+
+            const nIndex = getIndex(nx, ny);
+            if (data[nIndex + 3] > 0 && !toMakeTransparent.has(nIndex)) {
+              distanceVisited.add(key);
+              distanceQueue.push([nx, ny, dist + 1]);
+              distanceMap.set(nIndex, dist + 1);
+            }
+          }
+        }
+
+        // 3단계: Defringe + Feather 처리
+        for (const [index, distance] of distanceMap) {
+          const r = data[index];
+          const g = data[index + 1];
+          const b = data[index + 2];
+          const a = data[index + 3];
+
+          if (a === 0) continue;
+
+          // 흰색 성분 계산
+          const minRGB = Math.min(r, g, b);
+          const whiteness = minRGB / 255;
+          const brightness = (r + g + b) / 3 / 255;
+
+          // 거리에 따른 처리 강도 (가까울수록 강하게)
+          const distanceFactor = 1 - (distance - 1) / featherRadius;
+
+          // === 흰색 매트 제거 (Defringe) ===
+          if (whiteness > 0.3) {
+            // 흰색 성분 제거 강도 (거리와 밝기에 비례)
+            const removalStrength = distanceFactor * Math.min(1, whiteness * 1.5);
+            const whiteToRemove = minRGB * removalStrength * 0.9;
+
+            data[index] = Math.max(0, Math.round(r - whiteToRemove));
+            data[index + 1] = Math.max(0, Math.round(g - whiteToRemove));
+            data[index + 2] = Math.max(0, Math.round(b - whiteToRemove));
+          }
+
+          // === Feather 효과 (부드러운 투명 경계) ===
+          if (distance === 1) {
+            // 가장 바깥쪽 (1픽셀): 매우 강한 투명 처리
+            if (brightness > 0.6) {
+              data[index + 3] = Math.round(a * 0.05); // 거의 완전 투명
+            } else if (brightness > 0.4) {
+              data[index + 3] = Math.round(a * 0.15);
+            } else {
+              data[index + 3] = Math.round(a * 0.35);
+            }
+          } else if (distance === 2) {
+            // 2번째 픽셀: 강한 투명 처리
+            if (brightness > 0.6) {
+              data[index + 3] = Math.round(a * 0.2);
+            } else if (brightness > 0.4) {
+              data[index + 3] = Math.round(a * 0.4);
+            } else {
+              data[index + 3] = Math.round(a * 0.6);
+            }
+          } else if (distance === 3) {
+            // 3번째 픽셀: 중간 투명 처리
+            if (brightness > 0.6) {
+              data[index + 3] = Math.round(a * 0.5);
+            } else if (brightness > 0.4) {
+              data[index + 3] = Math.round(a * 0.7);
+            } else {
+              data[index + 3] = Math.round(a * 0.85);
+            }
+          } else if (distance === 4) {
+            // 4번째 픽셀: 약한 투명 처리
+            if (brightness > 0.6) {
+              data[index + 3] = Math.round(a * 0.75);
+            } else {
+              data[index + 3] = Math.round(a * 0.9);
+            }
+          } else if (distance === 5) {
+            // 5번째 픽셀: 미세한 투명 처리
+            if (brightness > 0.6) {
+              data[index + 3] = Math.round(a * 0.9);
+            }
+          }
+          // distance >= 6: 원본 유지
+        }
+
+        // 4단계: 추가 경계 정리 (아직 남은 밝은 외곽 픽셀 처리)
+        for (const [index, distance] of distanceMap) {
+          if (distance !== 1) continue;
+
+          const r = data[index];
+          const g = data[index + 1];
+          const b = data[index + 2];
+          const a = data[index + 3];
+
+          // 이미 투명해진 픽셀 건너뛰기
+          if (a < 50) continue;
+
+          // 아직 밝은 픽셀이면 추가 처리
+          const brightness = (r + g + b) / 3;
+          if (brightness > 180) {
+            data[index + 3] = Math.round(a * 0.3);
+          }
+        }
+
+        // 수정된 데이터 적용
+        ctx.putImageData(imageData, 0, 0);
+
+        // PNG로 변환 (투명도 지원)
+        const pngDataUrl = canvas.toDataURL('image/png');
+        resolve(pngDataUrl);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    img.onerror = () => {
+      reject(new Error('이미지 로드에 실패했습니다'));
+    };
+    img.src = imageDataUrl;
+  });
+}
+
+interface ImageGeneratorPanelProps {
+  apiKey: string;
+  analysis: ImageAnalysisResult;
+  referenceImages: string[];
+  sessionType: SessionType;
+  sessionName: string; // v0.4.4: 세션 이름 (저장 폴더 경로 생성용)
+  generationHistory?: GenerationHistoryEntry[];
+  onHistoryAdd?: (entry: GenerationHistoryEntry) => void;
+  onHistoryUpdate?: (entryId: string, updates: Partial<GenerationHistoryEntry>) => void;
+  onHistoryDelete?: (entryId: string) => void;
+  onBack?: () => void;
+  referenceDocuments?: ReferenceDocument[]; // 참조 문서 (UI 세션 전용)
+  onDocumentAdd?: (document: ReferenceDocument) => void;
+  onDocumentDelete?: (documentId: string) => void;
+  illustrationData?: IllustrationSessionData; // 일러스트 세션 전용 데이터
+  tilemapData?: TilemapSessionData; // TILEMAP 세션 전용 데이터
+  onTilemapDataChange?: (data: TilemapSessionData) => void; // TILEMAP 데이터 변경 콜백
+}
+
+// 통합 상태 타입 정의
+interface GeneratorState {
+  additionalPrompt: string;
+  isTranslating: boolean;
+  aspectRatio: AspectRatioOption;
+  imageSize: ImageSizeOption;
+  useReferenceImages: boolean;
+  isGenerating: boolean;
+  progressMessage: string;
+  generatedImage: string | null;
+  pixelArtGrid: PixelArtGridLayout;
+  pixelate: boolean; // 픽셀 정규화 적용 여부 (픽셀아트 세션 전용)
+  pixelateSize: PixelateSizeOption; // 픽셀 정규화 논리 해상도
+  pixelatePaletteSize: PaletteSizeOption; // 픽셀 정규화 팔레트 색 수
+  tilemapMode: TilemapMode; // 타일셋 모드 (변형/룰타일)
+  tilemapBaseTerrain: string; // 룰타일: 베이스 지형 (한국어 원문)
+  tilemapOverlayTerrain: string; // 룰타일: 오버레이 지형 (한국어 원문)
+  tilemapEdgeStyle: TilemapEdgeStyle; // 룰타일: 경계선 모양 프리셋
+  tilemapOutline: TilemapOutline; // 룰타일: 경계 아웃라인
+  tilemapOutline2: TilemapOutline; // 룰타일: 보조 아웃라인 (2단계 띠)
+  tilemapOutlineSide: TilemapOutlineSide; // 룰타일: 아웃라인을 뻗는 방향
+  cameraAngle: string;  // 카메라 앵글 프리셋 ID
+  cameraLens: string;   // 카메라 렌즈/화각 프리셋 ID
+  zoomLevel: 'fit' | 'actual' | number;
+  showZoomMenu: boolean;
+  showPathTooltip: boolean;
+  showHelp: boolean;
+  historyHeight: number;
+  imageModel: ImageGenerationModel;
+  imageQuality: ImageQualityOption;
+  /** 알파 PNG 생성 여부. 모델·세션이 지원할 때만 의미가 있다 (세션에 저장하지 않는다) */
+  transparentBackground: boolean;
+}
+
+export function ImageGeneratorPanel({
+  apiKey,
+  analysis,
+  referenceImages,
+  sessionType,
+  sessionName,
+  generationHistory = [],
+  onHistoryAdd,
+  onHistoryUpdate,
+  onHistoryDelete,
+  onBack,
+  referenceDocuments = [],
+  onDocumentAdd,
+  onDocumentDelete,
+  illustrationData,
+  tilemapData,
+  onTilemapDataChange,
+}: ImageGeneratorPanelProps) {
+  const { positivePrompt, negativePrompt } = useMemo(
+    () => buildUnifiedPrompt(analysis),
+    [analysis]
+  );
+  const { generateImage } = useImageGenerator();
+  const { translateToEnglish, containsKorean } = useGeminiTranslator();
+
+  // 통합 상태 관리
+  const [state, setState] = useState<GeneratorState>({
+    additionalPrompt: '',
+    isTranslating: false,
+    aspectRatio: IMAGE_GENERATION_DEFAULTS.ASPECT_RATIO,
+    imageSize: IMAGE_GENERATION_DEFAULTS.IMAGE_SIZE,
+    useReferenceImages: IMAGE_GENERATION_DEFAULTS.USE_REFERENCE_IMAGES,
+    isGenerating: false,
+    progressMessage: '',
+    generatedImage: null,
+    pixelArtGrid: sessionType === 'TILEMAP'
+      ? ((tilemapData?.mode ?? 'variation') === 'ruletile'
+          ? TILEMAP_RULETILE_GRID
+          : (tilemapData?.grid ?? '4x4'))
+      : IMAGE_GENERATION_DEFAULTS.PIXEL_ART_GRID,
+    pixelate: IMAGE_GENERATION_DEFAULTS.PIXELATE,
+    pixelateSize: IMAGE_GENERATION_DEFAULTS.PIXELATE_SIZE,
+    pixelatePaletteSize: IMAGE_GENERATION_DEFAULTS.PIXELATE_PALETTE_SIZE,
+    tilemapMode: (sessionType === 'TILEMAP' ? (tilemapData?.mode ?? 'variation') : 'variation') as TilemapMode,
+    tilemapBaseTerrain: tilemapData?.baseTerrain ?? '',
+    tilemapOverlayTerrain: tilemapData?.overlayTerrain ?? '',
+    tilemapEdgeStyle: tilemapData?.edgeStyle ?? DEFAULT_TILEMAP_EDGE_STYLE,
+    tilemapOutline: tilemapData?.outline ?? DEFAULT_TILEMAP_OUTLINE,
+    tilemapOutline2: tilemapData?.outline2 ?? DEFAULT_TILEMAP_OUTLINE2,
+    tilemapOutlineSide: tilemapData?.outlineSide ?? DEFAULT_TILEMAP_OUTLINE_SIDE,
+    cameraAngle: 'none',  // 기본값: 선택 안함
+    cameraLens: 'none',   // 기본값: 선택 안함
+    zoomLevel: 'fit',
+    showZoomMenu: false,
+    showPathTooltip: false,
+    showHelp: false,
+    historyHeight: HISTORY_PANEL.DEFAULT_HEIGHT,
+    // TILEMAP은 덕테이프(gpt-image-2) 고정 — 나노바나나 계열은 머티리얼 시트 레이아웃을
+    // 제대로 지키지 못해 정상적인 타일 세트가 나오지 않는다
+    imageModel: sessionType === 'TILEMAP' ? TILEMAP_FIXED_IMAGE_MODEL : DEFAULT_IMAGE_MODEL,
+    imageQuality: 'medium',
+    transparentBackground: false,
+  });
+
+  /*
+    구도 스케치 — **이번 생성에만 쓰는 가이드**라 세션에 저장하지 않는다.
+
+    프롬프트(`additionalPrompt`)도 패널 상태라 세션 전환 시 사라지는데, 스케치만 영속화하면
+    "프롬프트는 날아갔는데 스케치는 남아 있는" 어긋난 상태가 된다. 게다가 스케치 PNG는
+    data URL이라 세션에 넣으면 저장 파일이 커진다(ILLUSTRATION이 이미 그렇게 하고 있어
+    그 비용을 전 세션으로 퍼뜨릴 이유가 없다).
+    영속화가 필요해지면 `illustrationData.conceptSketch`처럼 세션 레벨로 올리면 된다.
+  */
+  const [conceptSketch, setConceptSketch] = useState<ConceptSketch | null>(null);
+  const [showSketchPanel, setShowSketchPanel] = useState(false);
+  const canUseSketch = isSketchEnabledSession(sessionType);
+
+  // 상태 업데이트 헬퍼 함수 (useCallback으로 안정화하여 자식 메모이제이션 유지)
+  const updateState = useCallback((updates: Partial<GeneratorState>) => {
+    setState(prev => ({ ...prev, ...updates }));
+  }, []);
+
+  // 상태에서 자주 사용되는 값들을 destructure
+  const {
+    additionalPrompt,
+    isTranslating,
+    aspectRatio,
+    imageSize,
+    useReferenceImages,
+    isGenerating,
+    progressMessage,
+    generatedImage,
+    pixelArtGrid,
+    pixelate,
+    pixelateSize,
+    pixelatePaletteSize,
+    tilemapMode,
+    tilemapBaseTerrain,
+    tilemapOverlayTerrain,
+    tilemapEdgeStyle,
+    tilemapOutline,
+    tilemapOutline2,
+    tilemapOutlineSide,
+    cameraAngle,
+    cameraLens,
+    zoomLevel,
+    showZoomMenu,
+    showPathTooltip,
+    showHelp,
+    historyHeight,
+    imageModel,
+    imageQuality,
+    transparentBackground,
+  } = state;
+
+  // 타일맵 생성 후처리 (TILEMAP 세션에서만 동작)
+  const tilemap = useTilemapProcessing({
+    enabled: sessionType === 'TILEMAP',
+    tilemapData,
+    onTilemapDataChange,
+    pixelArtGrid,
+    mode: tilemapMode,
+    baseTerrain: tilemapBaseTerrain,
+    overlayTerrain: tilemapOverlayTerrain,
+    edgeStyle: tilemapEdgeStyle,
+    outline: tilemapOutline,
+    outline2: tilemapOutline2,
+    outlineSide: tilemapOutlineSide,
+  });
+
+  const resolveStoredImage = useCallback(async (image: string): Promise<string> => {
+    if (!image) return image;
+    if (image.startsWith('data:')) return image;
+    const restored = await loadImage(image);
+    return restored ?? image;
+  }, []);
+
+  // 기존 코드 호환성을 위한 개별 setter 함수들 (useCallback으로 안정화)
+  const setAdditionalPrompt = useCallback((value: string) => updateState({ additionalPrompt: value }), [updateState]);
+  const setIsTranslating = useCallback((value: boolean) => updateState({ isTranslating: value }), [updateState]);
+  const setAspectRatio = useCallback((value: AspectRatioOption) => updateState({ aspectRatio: value }), [updateState]);
+  const setImageSize = useCallback((value: ImageSizeOption) => updateState({ imageSize: value }), [updateState]);
+  const setUseReferenceImages = useCallback((value: boolean) => updateState({ useReferenceImages: value }), [updateState]);
+  const setIsGenerating = useCallback((value: boolean) => updateState({ isGenerating: value }), [updateState]);
+  const setProgressMessage = useCallback((value: string) => updateState({ progressMessage: value }), [updateState]);
+  const setGeneratedImage = useCallback((value: string | null) => updateState({ generatedImage: value }), [updateState]);
+  const setPixelArtGrid = useCallback((value: PixelArtGridLayout) => updateState({ pixelArtGrid: value }), [updateState]);
+  const setPixelate = useCallback((value: boolean) => updateState({ pixelate: value }), [updateState]);
+  const setPixelateSize = useCallback((value: PixelateSizeOption) => updateState({ pixelateSize: value }), [updateState]);
+  const setPixelatePaletteSize = useCallback((value: PaletteSizeOption) => updateState({ pixelatePaletteSize: value }), [updateState]);
+  const setTilemapMode = useCallback((value: TilemapMode) => updateState({ tilemapMode: value }), [updateState]);
+  const setTilemapBaseTerrain = useCallback((value: string) => updateState({ tilemapBaseTerrain: value }), [updateState]);
+  const setTilemapOverlayTerrain = useCallback((value: string) => updateState({ tilemapOverlayTerrain: value }), [updateState]);
+  const setTilemapEdgeStyle = useCallback((value: TilemapEdgeStyle) => updateState({ tilemapEdgeStyle: value }), [updateState]);
+  const setTilemapOutline = useCallback((value: TilemapOutline) => updateState({ tilemapOutline: value }), [updateState]);
+  const setTilemapOutline2 = useCallback((value: TilemapOutline) => updateState({ tilemapOutline2: value }), [updateState]);
+  const setTilemapOutlineSide = useCallback((value: TilemapOutlineSide) => updateState({ tilemapOutlineSide: value }), [updateState]);
+
+  // 생성 직후 자동 내보내기된 폴더 경로 (결과 뷰에 안내로 표시)
+  const [lastAutoExportFolder, setLastAutoExportFolder] = useState<string | null>(null);
+  const setCameraAngle = useCallback((value: string) => updateState({ cameraAngle: value }), [updateState]);
+  const setCameraLens = useCallback((value: string) => updateState({ cameraLens: value }), [updateState]);
+  const setZoomLevel = useCallback((value: 'fit' | 'actual' | number) => updateState({ zoomLevel: value }), [updateState]);
+  const setShowZoomMenu = useCallback((value: boolean) => updateState({ showZoomMenu: value }), [updateState]);
+  const setShowPathTooltip = useCallback((value: boolean) => updateState({ showPathTooltip: value }), [updateState]);
+  const setShowHelp = useCallback((value: boolean) => updateState({ showHelp: value }), [updateState]);
+  const setImageModel = useCallback((value: ImageGenerationModel) => updateState({ imageModel: value }), [updateState]);
+  const setImageQuality = useCallback((value: ImageQualityOption) => updateState({ imageQuality: value }), [updateState]);
+  const setTransparentBackground = useCallback((value: boolean) => updateState({ transparentBackground: value }), [updateState]);
+
+  // 투명 배경 토글 노출 조건 — 모델이 background를 지원하고, 원래 순백 배경을 강제하던 세션일 때
+  const canUseTransparentBackground =
+    getImageModelDefinition(imageModel).supports.transparentBackground &&
+    TRANSPARENT_BACKGROUND_CAPABLE_SESSIONS.includes(sessionType);
+
+  // 줌 메뉴 외부 클릭 시 닫기
+  useEffect(() => {
+    if (showZoomMenu) {
+      const handleClickOutside = () => updateState({ showZoomMenu: false });
+      document.addEventListener('click', handleClickOutside);
+      return () => document.removeEventListener('click', handleClickOutside);
+    }
+  }, [showZoomMenu]);
+
+  // TILEMAP은 덕테이프 계열 안에서만 고를 수 있다 — 히스토리 복원 등으로 나노바나나 계열이
+  // 들어오면 검증된 기본값으로 되돌린다. 계열 안(2.0 ↔ 2.5)의 선택은 사용자 몫이라 건드리지 않는다.
+  useEffect(() => {
+    if (sessionType === 'TILEMAP' && !isTilemapCompatibleModel(imageModel)) {
+      updateState({ imageModel: TILEMAP_FIXED_IMAGE_MODEL });
+    }
+  }, [sessionType, imageModel, updateState]);
+
+  // 룰타일은 8x8 고정 — 4x4는 대각을 구분하지 못해 오목 코너·1칸 통로를 표현할 수 없다.
+  // 모드 전환·세션 복원 등 어느 경로로 4x4가 들어와도 되돌린다(그리드 선택 UI도 숨겨져 있다).
+  useEffect(() => {
+    if (
+      sessionType === 'TILEMAP' &&
+      tilemapMode === 'ruletile' &&
+      pixelArtGrid !== TILEMAP_RULETILE_GRID
+    ) {
+      updateState({ pixelArtGrid: TILEMAP_RULETILE_GRID });
+    }
+  }, [sessionType, tilemapMode, pixelArtGrid, updateState]);
+
+  useEffect(() => {
+    const modelDef = getImageModelDefinition(imageModel);
+    const nextState: Partial<GeneratorState> = {};
+
+    if (!modelDef.supports.aspectRatios.includes(aspectRatio)) {
+      nextState.aspectRatio = modelDef.supports.aspectRatios[0];
+    }
+    if (!modelDef.supports.imageSizes.includes(imageSize)) {
+      nextState.imageSize = modelDef.supports.imageSizes[0];
+    }
+    /*
+      품질도 보정해야 한다. 모델마다 티어가 다르고(나노바나나 ['medium'], 덕테이프
+      low/medium/high, 2.5 계열은 xhigh·max 추가) 상위 티어를 고른 채 하위 모델로 바꾸면
+      지원하지 않는 값이 그대로 전송돼 4xx가 난다. UI에서는 안 보이므로 원인을 찾기 어렵다.
+      'medium'이 있으면 그쪽으로 — 첫 값(low)으로 떨어뜨리면 품질이 조용히 낮아진다.
+    */
+    if (!modelDef.supports.qualities.includes(imageQuality)) {
+      nextState.imageQuality = modelDef.supports.qualities.includes('medium')
+        ? 'medium'
+        : modelDef.supports.qualities[0];
+    }
+
+    // background 미지원 모델(나노바나나 계열)로 바꾸면 투명 요청은 무효이므로 내린다
+    if (transparentBackground && !modelDef.supports.transparentBackground) {
+      nextState.transparentBackground = false;
+    }
+
+    if (Object.keys(nextState).length > 0) {
+      updateState(nextState);
+    }
+  }, [imageModel, aspectRatio, imageSize, imageQuality, transparentBackground, updateState]);
+
+  // setState updater 패턴 + useCallback으로 자식 memo 무효화 방지
+  const handleHistoryResize = useCallback((delta: number) => {
+    setState(prev => ({
+      ...prev,
+      historyHeight: Math.max(120, Math.min(600, prev.historyHeight - delta)),
+    }));
+  }, []);
+
+
+  const handleGenerate = async () => {
+    if (!apiKey) {
+      alert('OpenRouter API 키를 먼저 설정해주세요. Style Studio 헤더의 설정 아이콘에서 입력할 수 있습니다.');
+      return;
+    }
+
+    const isRuletile = sessionType === 'TILEMAP' && tilemapMode === 'ruletile';
+    // 픽셀 정규화는 픽셀아트 세션에만 적용한다 — 일반 세션 결과를 블록화하면 그림이 망가진다
+    const isPixelArtSession = sessionType.startsWith('PIXELART_');
+    // 지형을 비우면 그 지형은 투명으로 합성된다(어떤 바닥에도 얹는 길 타일).
+    // 다만 **둘 다** 비면 아웃라인 말고는 아무것도 남지 않으므로 막는다.
+    if (isRuletile && !tilemapBaseTerrain.trim() && !tilemapOverlayTerrain.trim()) {
+      alert('베이스 지형과 오버레이 지형 중 최소 하나는 입력해주세요.\n비워 둔 지형은 투명하게 처리됩니다. (예: 잔디 / 흙길)');
+      return;
+    }
+
+    setIsGenerating(true);
+    setLastAutoExportFolder(null);
+    setProgressMessage('이미지 생성 준비 중...');
+    setGeneratedImage(null);
+
+    try {
+      // 1단계: 한국어 프롬프트를 영어로 번역
+      setIsTranslating(true);
+      setProgressMessage('프롬프트를 영어로 변환 중...');
+
+      // 추가 프롬프트: 한글이면 번역, 영어면 그대로 사용
+      let translatedAdditionalPrompt = '';
+      if (additionalPrompt.trim()) {
+        if (containsKorean(additionalPrompt.trim())) {
+          logger.debug('🌐 추가 프롬프트 번역 중...');
+          translatedAdditionalPrompt = await translateToEnglish(apiKey, additionalPrompt.trim());
+        } else {
+          translatedAdditionalPrompt = additionalPrompt.trim();
+        }
+      }
+
+      // 룰타일 지형 필드: 한글이면 번역, 영어면 그대로 사용 (프롬프트에는 번역본, tilemapData 저장에는 원문)
+      let translatedBaseTerrain = tilemapBaseTerrain.trim();
+      let translatedOverlayTerrain = tilemapOverlayTerrain.trim();
+      if (isRuletile) {
+        if (containsKorean(translatedBaseTerrain)) {
+          translatedBaseTerrain = (await translateToEnglish(apiKey, translatedBaseTerrain)).trim() || translatedBaseTerrain;
+        }
+        if (containsKorean(translatedOverlayTerrain)) {
+          translatedOverlayTerrain = (await translateToEnglish(apiKey, translatedOverlayTerrain)).trim() || translatedOverlayTerrain;
+        }
+      }
+
+      setIsTranslating(false);
+      logger.debug('✅ 프롬프트 준비 완료');
+      logger.debug('   - 추가 프롬프트:', translatedAdditionalPrompt);
+
+      // 2단계: 최종 프롬프트 구성 (영어 사용)
+      let finalPrompt = '';
+
+      // 카메라 앵글 및 렌즈 프롬프트 가져오기
+      const cameraAnglePrompt = getCameraAnglePrompt(cameraAngle);
+      const cameraLensPrompt = getCameraLensPrompt(cameraLens);
+
+      // 카메라 설정 프롬프트 합치기
+      const cameraSettingsStr = [cameraAnglePrompt, cameraLensPrompt].filter(Boolean).join(', ');
+
+      if (sessionType === 'ILLUSTRATION' && illustrationData) {
+        // 일러스트 세션: 카메라 설정을 basePrompt에 포함하지 않고 별도로 전달
+        // 캐릭터 복제가 최우선이므로 카메라 설정은 별도 섹션으로 처리
+        const basePromptParts = [translatedAdditionalPrompt].filter(Boolean);
+        const basePrompt = basePromptParts.join(', ');
+        finalPrompt = buildPromptForSession({
+          basePrompt: basePrompt || 'Create an illustration with the characters',
+          hasReferenceImages: true,
+          sessionType: 'ILLUSTRATION',
+          illustrationData: illustrationData,
+          pixelArtGrid: pixelArtGrid, // 그리드 레이아웃 전달
+          cameraSettings: cameraSettingsStr || undefined, // 카메라 설정 별도 전달
+        });
+      } else {
+        // 모든 세션 타입: buildPromptForSession으로 통합 처리
+        const hasRefImages = useReferenceImages && referenceImages.length > 0;
+        const basePromptParts = [translatedAdditionalPrompt].filter(Boolean);
+
+        // 카메라 설정 추가
+        if (cameraSettingsStr) {
+          basePromptParts.push(cameraSettingsStr);
+        }
+
+        // 참조 이미지가 없으면 분석 프롬프트도 포함
+        if (!hasRefImages) {
+          basePromptParts.push(positivePrompt);
+        }
+
+        const basePrompt = basePromptParts.filter(Boolean).join(', ') || positivePrompt;
+
+        finalPrompt = buildPromptForSession({
+          basePrompt,
+          hasReferenceImages: hasRefImages,
+          sessionType,
+          pixelArtGrid,
+          analysis,
+          referenceDocuments,
+          ...(sessionType === 'TILEMAP'
+            ? isRuletile
+              ? {
+                  tilemapMode: 'ruletile' as TilemapMode,
+                  tilemapBaseTerrain: translatedBaseTerrain,
+                  tilemapOverlayTerrain: translatedOverlayTerrain,
+                              }
+              : { tilemapMode: 'variation' as TilemapMode }
+            : {}),
+        });
+      }
+
+      /*
+        구도 스케치 가이드. 세션 종류에 따라 문구가 완전히 달라진다(배치 가이드 vs 포즈·방향
+        가이드) — 근거와 문구는 `lib/prompts/sketchGuide.ts`에 모여 있다.
+      */
+      if (canUseSketch) {
+        finalPrompt += buildSketchGuideSection(sessionType, conceptSketch);
+      }
+
+      logger.debug('🎨 최종 프롬프트 (영어):', finalPrompt);
+
+      // 3단계: 이미지 생성
+      // ILLUSTRATION 세션의 경우 캐릭터 및 배경 참조 이미지 수집 (캐릭터당 최대 3장)
+      let finalReferenceImages: string[] | undefined;
+      if (sessionType === 'ILLUSTRATION' && illustrationData) {
+        const allImages: string[] = [];
+        // 캐릭터 참조 이미지 수집 (캐릭터당 최대 ILLUSTRATION_LIMITS.MAX_IMAGES_PER_CHARACTER장)
+        illustrationData.characters.forEach(char => {
+          if (char.images && char.images.length > 0) {
+            const limitedImages = char.images.slice(0, ILLUSTRATION_LIMITS.MAX_IMAGES_PER_CHARACTER);
+            allImages.push(...limitedImages);
+            logger.debug(`   - ${char.name}: ${limitedImages.length}장 (최대 ${ILLUSTRATION_LIMITS.MAX_IMAGES_PER_CHARACTER}장)`);
+          }
+        });
+        // 배경 참조 이미지 수집
+        if (illustrationData.backgroundImages && illustrationData.backgroundImages.length > 0) {
+          allImages.push(...illustrationData.backgroundImages);
+        }
+        // 구도 스케치를 마지막 reference로 첨부 — prompt에서 "마지막 reference는 구도 가이드"로 명시
+        if (illustrationData.conceptSketch?.sketchPng) {
+          allImages.push(illustrationData.conceptSketch.sketchPng);
+          logger.debug('   - 구도 스케치 1장 첨부 (마지막 reference)');
+        }
+        finalReferenceImages =
+          allImages.length > 0
+            ? await Promise.all(allImages.map((img) => resolveStoredImage(img)))
+            : undefined;
+        logger.debug(`📸 ILLUSTRATION 참조 이미지 총: ${allImages.length}장`);
+      } else if (sessionType === 'CHARACTER' || useReferenceImages) {
+        finalReferenceImages = await Promise.all(
+          referenceImages.map((img) => resolveStoredImage(img))
+        );
+      }
+
+      /*
+        구도 스케치를 **마지막 reference**로 붙인다. ILLUSTRATION이 쓰는 규약과 같다 —
+        프롬프트가 "마지막 참조는 구도 가이드"라고 명시하므로 순서가 계약이다.
+        참조가 하나도 없던 경우(텍스트 생성)에도 스케치만 단독으로 붙는다.
+      */
+      if (canUseSketch && conceptSketch?.sketchPng) {
+        finalReferenceImages = [...(finalReferenceImages ?? []), conceptSketch.sketchPng];
+        logger.debug('   - 구도 스케치 1장 첨부 (마지막 reference)');
+      }
+
+      const callbacks = {
+        onProgress: (message: string) => {
+          setProgressMessage(message);
+          logger.debug('📊 진행:', message);
+        },
+        onComplete: async (imageBase64: string) => {
+            // MIME을 하드코딩하지 않는다 — 모델·경로에 따라 PNG가 올 수 있고,
+            // 잘못 라벨링하면 저장 단계가 PNG 바이트를 .jpg로 내보낸다(투명 채널 손실처럼 보임).
+            // 매직 넘버로 실제 포맷을 판별해 붙인다 (lib/utils/imageDataUrl.ts)
+            const rawFormat = detectImageFormat(`data:image/png;base64,${imageBase64}`);
+            let dataUrl = `data:image/${rawFormat === 'jpg' ? 'jpeg' : rawFormat};base64,${imageBase64}`;
+
+            // 흰색 배경 제거 대상 세션 타입인지 확인
+            const shouldRemoveBackground = TRANSPARENT_BACKGROUND_SESSION_TYPES.includes(sessionType);
+
+            if (shouldRemoveBackground) {
+              setProgressMessage('배경 제거 중...');
+              logger.debug('🎨 흰색 배경 제거 시작...');
+              try {
+                dataUrl = await removeWhiteBackground(dataUrl, 240);
+                logger.debug('✅ 배경 제거 완료');
+              } catch (bgError) {
+                logger.error('❌ 배경 제거 실패:', bgError);
+                // 배경 제거 실패해도 원본 이미지 사용
+              }
+            }
+
+            // 픽셀 정규화 — AI 원본은 픽셀 격자에 정렬돼 있지 않다(경계 흐림·블록 내부 색 흔들림).
+            // 격자를 찾아 논리 해상도로 재구성한 뒤 정수배 Nearest-Neighbor로 되돌린다.
+            //
+            // 주의: 표시·자동저장·히스토리 모두 이 정규화 결과를 쓴다(WYSIWYG). AI 원본은
+            // 보존되지 않는다 — 히스토리는 항목당 이미지 키가 하나뿐이라(`{sessionId}-gen-{id}`)
+            // 원본을 함께 남기려면 storage.ts의 키·마이그레이션·export/import·orphan 정리를
+            // 모두 확장해야 한다. 원본이 필요하면 토글을 끄고 생성한다.
+            if (isPixelArtSession && pixelate) {
+              setProgressMessage('픽셀 정규화 중...');
+              try {
+                const pixelated = await pixelateDataUrl(dataUrl, {
+                  size: pixelateSize,
+                  paletteSize: pixelatePaletteSize,
+                  grid: pixelArtGrid,
+                });
+                dataUrl = pixelated.dataUrl;
+                logger.debug(
+                  `✅ 픽셀 정규화 완료: ${pixelated.logicalWidth}x${pixelated.logicalHeight} ` +
+                  `· ${pixelated.paletteSize}색 · x${pixelated.scale} 확대 (격자 정합 ${pixelated.gridScore.toFixed(2)})`
+                );
+              } catch (pixelateError) {
+                logger.error('❌ 픽셀 정규화 실패:', pixelateError);
+                // 실패해도 원본 이미지 사용 (배경 제거와 동일한 방어 패턴)
+              }
+            }
+
+            setGeneratedImage(dataUrl);
+            setZoomLevel('fit'); // 이미지 생성 시 줌을 '화면에 맞춤'으로 리셋
+            setIsGenerating(false);
+            setIsTranslating(false);
+            setProgressMessage('');
+            logger.debug('✅ 생성 완료');
+
+            // 자동 저장 (배경 제거 대상은 PNG, 그 외는 JPG).
+            //
+            // TILEMAP은 제외한다: 이 자동 저장은 AI 원본을 세션 폴더에 그대로 떨어뜨리는데,
+            // 타일맵에서 그 원본은 최종 산출물이 아니다(룰타일이면 재질 스와치 3패널,
+            // 변형이면 분할 전 시트). 세션 폴더에 폴더와 나란히 놓여 "시트 이미지와
+            // 동기화되지 않은 잉여 파일"로 보인다. 타일맵은 대신 자동 내보내기가
+            // tilemap_{타임스탬프}/ 폴더에 tilesheet.png + 개별 타일을 기록하며,
+            // AI 원본이 필요하면 히스토리(imageStorage)에 그대로 남아 있다.
+            if (sessionType !== 'TILEMAP') {
+              try {
+                const savedPath = await autoSaveImage(dataUrl);
+                logger.debug('💾 자동 저장 완료:', savedPath);
+              } catch (error) {
+                logger.error('❌ 자동 저장 실패:', error);
+                // 자동 저장 실패해도 이미지 표시는 계속
+              }
+            }
+
+            // 히스토리에 추가
+            if (onHistoryAdd) {
+              const historyEntry: GenerationHistoryEntry = {
+                id: `gen-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+                timestamp: new Date().toISOString(),
+                prompt: finalPrompt,
+                negativePrompt: negativePrompt,
+                additionalPrompt: additionalPrompt.trim() || undefined, // 추가 포즈/동작 프롬프트 (원본)
+                imageBase64: dataUrl,
+                settings: {
+                  aspectRatio: aspectRatio,
+                  imageSize: imageSize,
+                  useReferenceImages: sessionType === 'CHARACTER' || useReferenceImages,
+                  pixelArtGrid: pixelArtGrid, // 스프라이트 그리드 레이아웃
+                  cameraAngle: cameraAngle !== 'none' ? cameraAngle : undefined, // 카메라 앵글
+                  cameraLens: cameraLens !== 'none' ? cameraLens : undefined,   // 카메라 렌즈/화각
+                  // 픽셀 정규화 설정 (픽셀아트 세션에서만 의미가 있다)
+                  ...(isPixelArtSession
+                    ? {
+                        pixelate,
+                        pixelateSize,
+                        pixelatePaletteSize,
+                      }
+                    : {}),
+                },
+                referenceDocumentIds: referenceDocuments?.map(doc => doc.id), // 참조 문서 ID 목록
+              };
+              onHistoryAdd(historyEntry);
+              logger.debug('📜 히스토리에 추가됨:', historyEntry.id);
+            }
+
+            // 타일맵 세션: 시트 분할/합성·슬롯 할당 후처리 → 확정되면 자동 내보내기
+            if (sessionType === 'TILEMAP') {
+              let exportReady: Awaited<ReturnType<typeof tilemap.processNewSheet>> = null;
+              try {
+                setProgressMessage(
+                  tilemapMode === 'ruletile' ? '룰타일 합성 중...' : '타일 변형 합성 중...'
+                );
+                exportReady = await tilemap.processNewSheet(dataUrl);
+              } catch (e) {
+                logger.error('❌ 타일맵 후처리 실패:', e);
+                alert('타일 처리에 실패했습니다. 시트는 히스토리에 남아 있으니 다시 생성해 주세요.');
+              }
+
+              // 생성은 항상 슬롯 전체를 확정하므로 곧바로 자동 내보내기 대상이다.
+              // 상태 반영은 비동기라 currentTiles를 읽을 수 없으므로 반환값을 그대로 쓴다.
+              if (exportReady) {
+                try {
+                  setProgressMessage('유니티용 내보내기 중...');
+                  const folder = await exportTilemapForUnity({
+                    sessionName,
+                    grid: exportReady.grid,
+                    tiles: exportReady.tiles,
+                    mode: exportReady.mode,
+                    baseTiles: exportReady.baseTiles,
+                  });
+                  logger.debug('📦 타일맵 자동 내보내기 완료:', folder);
+                  setLastAutoExportFolder(folder);
+                } catch (e) {
+                  // 내보내기 실패가 생성 결과를 잃게 하면 안 되므로 조용히 로그만 남긴다.
+                  // 사용자는 "유니티 내보내기" 버튼으로 언제든 재시도할 수 있다.
+                  logger.error('❌ 타일맵 자동 내보내기 실패:', e);
+                }
+              }
+              setProgressMessage('');
+            }
+          },
+        onError: (error: Error) => {
+          setIsGenerating(false);
+          setIsTranslating(false);
+          setProgressMessage('');
+          logger.error('❌ 생성 오류:', error);
+          alert('이미지 생성 실패: ' + error.message);
+        },
+      };
+
+      // OpenRouter Image API 단일 경로 — provider별 파라미터 매핑은 훅 내부에서 처리
+      await generateImage(
+        apiKey,
+        {
+          prompt: finalPrompt,
+          negativePrompt: negativePrompt,
+          referenceImages: finalReferenceImages,
+          aspectRatio: aspectRatio,
+          imageSize: imageSize,
+          quality: imageQuality,
+          transparentBackground: canUseTransparentBackground && transparentBackground,
+          sessionType: sessionType,
+          // 픽셀아트 전용 설정
+          analysis: analysis, // 이미지 분석 결과 (픽셀아트 해상도 추출용)
+          pixelArtGrid: pixelArtGrid, // 픽셀아트 그리드 레이아웃
+          // UI 세션 전용 설정
+          referenceDocuments: referenceDocuments, // 참조 문서 (UI 세션에서 기획 내용 반영)
+          imageModel: imageModel, // 이미지 생성 모델
+          // 위에서 buildPromptForSession 으로 완성했다 — 훅이 템플릿을 다시 씌우지 않게 한다
+          promptIsFinal: true,
+        },
+        callbacks
+      );
+    } catch (error) {
+      setIsGenerating(false);
+      setIsTranslating(false);
+      setProgressMessage('');
+      logger.error('❌ 프롬프트 변환 또는 생성 오류:', error);
+      alert('오류 발생: ' + (error as Error).message);
+    }
+  };
+
+  /**
+   * 자동 저장 함수 (세션별 폴더 고정, v0.4.4).
+   * 확장자는 **실제 바이트**에서 결정한다 — 세션 타입으로 추측하면 PNG를 .jpg로 내보낸다.
+   */
+  const autoSaveImage = async (imageDataUrl: string) => {
+    try {
+      // Data URL 형식 검증
+      if (!imageDataUrl || !imageDataUrl.startsWith('data:')) {
+        throw new Error('유효하지 않은 이미지 데이터 형식입니다');
+      }
+
+      // 저장 경로 결정 (v0.4.4: 세션별 폴더 고정)
+      const savePath = await getSessionImageFolder(sessionName);
+      logger.debug('🔍 저장 경로:', savePath);
+
+      // 파일명 생성 (바이트가 PNG면 반드시 .png — 알파를 가진 파일을 .jpg로 두면
+      // 뷰어·임포터가 투명 영역을 흰색이나 체크무늬로 그린다)
+      const timestamp = Date.now();
+      const fileExtension = getImageSaveFormat(imageDataUrl).extension;
+      const fileName = `style-studio-${timestamp}.${fileExtension}`;
+      const fullPath = await join(savePath, fileName);
+
+      logger.debug('💾 자동 저장 시작:', fullPath);
+
+      // Base64를 Uint8Array로 변환 (원본 그대로 저장)
+      const base64Data = imageDataUrl.split(',')[1];
+      if (!base64Data) {
+        throw new Error('Base64 데이터를 추출할 수 없습니다. Data URL 형식이 잘못되었습니다.');
+      }
+
+      let binaryString: string;
+      try {
+        binaryString = atob(base64Data);
+      } catch (atobError) {
+        logger.error('❌ Base64 디코딩 실패:', atobError);
+        throw new Error('Base64 디코딩에 실패했습니다. 이미지 데이터가 손상되었을 수 있습니다.');
+      }
+
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      await writeFile(fullPath, bytes);
+      logger.debug('✅ 이미지 자동 저장 완료:', fullPath);
+
+      return fullPath;
+    } catch (error) {
+      logger.error('❌ 자동 저장 오류:', error);
+      throw error;
+    }
+  };
+
+  // 수동 저장 함수 (사용자가 다운로드 버튼 클릭 시) — useCallback으로 자식 memo 유지
+  const handleManualSave = useCallback(async () => {
+    // TILEMAP 시트 보기는 AI 원본이 아니라 **합성 시트**(내보내기와 동일)를 표시하므로,
+    // 다운로드 버튼도 화면에 보이는 그 이미지를 저장해야 한다.
+    const imageToSave =
+      sessionType === 'TILEMAP' ? (tilemap.composedSheet ?? generatedImage) : generatedImage;
+    if (!imageToSave) {
+      return;
+    }
+
+    // Base64 data URL 형식 검증
+    if (!imageToSave.startsWith('data:')) {
+      logger.error('❌ 유효하지 않은 이미지 형식:', imageToSave.substring(0, 50));
+      alert('이미지 다운로드에 실패했습니다.\n\n이미지 데이터가 손상되었습니다. 세션을 다시 import하거나 이미지를 새로 생성해주세요.');
+      return;
+    }
+
+    // 저장 포맷은 **실제 바이트**에서 판별한다. 세션 타입 목록으로 추측하던 예전 방식은
+    // 타일맵 합성 시트(투명 PNG)를 .jpg로 내보냈다 — 확장자와 헤더가 어긋나면
+    // OS 썸네일러·유니티 임포터가 투명 영역을 흰색이나 체크무늬로 그린다.
+    const saveFormat = getImageSaveFormat(imageToSave);
+
+    try {
+      // 저장 경로 결정 (v0.4.4: 세션별 폴더 고정)
+      const defaultPath = await getSessionImageFolder(sessionName);
+
+      // 기본 파일명 생성 (확장자 = 실제 바이트 포맷)
+      const timestamp = Date.now();
+      const defaultFileName = `style-studio-${timestamp}.${saveFormat.extension}`;
+      const defaultFilePath = await join(defaultPath, defaultFileName);
+
+      // Tauri의 save 다이얼로그 사용 (OS 네이티브, 덮어쓰기 자동 확인)
+      const selectedPath = await save({
+        defaultPath: defaultFilePath,
+        filters: [saveFormat.filter],
+        title: '이미지 저장',
+      });
+
+      // 사용자가 취소한 경우
+      if (!selectedPath) {
+        logger.debug('💾 사용자가 저장 취소');
+        return;
+      }
+
+      logger.debug('💾 수동 저장 경로:', selectedPath);
+      logger.debug('   이미지 데이터 형식:', imageToSave.substring(0, 50) + '...');
+      logger.debug('   이미지 데이터 길이:', imageToSave.length);
+
+      // Base64를 Uint8Array로 변환
+      const base64Data = imageToSave.split(',')[1];
+      if (!base64Data) {
+        throw new Error('Base64 데이터를 추출할 수 없습니다. Data URL 형식이 잘못되었습니다.');
+      }
+
+      logger.debug('   Base64 데이터 길이:', base64Data.length);
+
+      // atob() 함수로 디코딩 시도
+      let binaryString: string;
+      try {
+        binaryString = atob(base64Data);
+      } catch (atobError) {
+        logger.error('❌ Base64 디코딩 실패:', atobError);
+        throw new Error('Base64 디코딩에 실패했습니다. 이미지 데이터가 손상되었을 수 있습니다.');
+      }
+
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      logger.debug('   바이너리 데이터 크기:', bytes.length, 'bytes');
+
+      // 파일 저장
+      await writeFile(selectedPath, bytes);
+      logger.debug('✅ 이미지 수동 저장 완료:', selectedPath);
+
+      alert(`이미지가 저장되었습니다.\n\n${selectedPath}`);
+    } catch (error) {
+      // 에러 정보를 더 자세히 로깅
+      logger.error('❌ 수동 저장 오류 (상세):', {
+        error,
+        errorType: typeof error,
+        errorConstructor: error?.constructor?.name,
+        errorMessage: error instanceof Error ? error.message : String(error),
+        errorStack: error instanceof Error ? error.stack : undefined,
+      });
+
+      // 사용자에게 표시할 에러 메시지
+      let errorMessage = '알 수 없는 오류가 발생했습니다';
+      if (error instanceof Error) {
+        errorMessage = error.message;
+      } else if (typeof error === 'string') {
+        errorMessage = error;
+      } else if (error && typeof error === 'object' && 'message' in error) {
+        errorMessage = String((error as any).message);
+      }
+
+      alert('이미지 저장에 실패했습니다.\n\n' + errorMessage);
+    }
+  }, [generatedImage, tilemap.composedSheet, sessionType, sessionName]);
+
+  // 유니티용 내보내기: 교체 반영 시트 + 개별 타일 + 가이드
+  const handleTilemapExport = useCallback(async () => {
+    const tiles = tilemap.currentTiles;
+    if (tiles.length === 0 || tiles.some((t) => t === null)) {
+      alert('내보낼 타일이 아직 없습니다. 먼저 타일 세트를 생성해 주세요.');
+      return;
+    }
+    try {
+      const folder = await exportTilemapForUnity({
+        sessionName,
+        grid: tilemap.displayGrid,
+        tiles: tiles as string[],
+        mode: tilemap.effectiveMode,
+        baseTiles: tilemap.baseTiles,
+        // 레거시 세트는 가이드에서 접합 보장을 주장하면 안 된다 (buildImportGuide 주석 참조)
+        legacySet: tilemap.needsRecompose,
+      });
+      alert(`유니티용 타일맵을 내보냈습니다.\n\n${folder}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error('❌ 타일맵 내보내기 실패:', error);
+      alert('타일맵 내보내기에 실패했습니다.\n\n' + message);
+    }
+  }, [tilemap.currentTiles, tilemap.displayGrid, tilemap.effectiveMode, tilemap.baseTiles, tilemap.needsRecompose, sessionName]);
+
+  // 히스토리에서 설정 복원 (단일 setState + useCallback으로 자식 memo 유지)
+  const handleRestoreFromHistory = useCallback(async (e: React.MouseEvent, entry: GenerationHistoryEntry) => {
+    e.stopPropagation();
+    logger.debug('🔄 히스토리에서 설정 복원:', entry.id);
+
+    const restoredHistoryImage = await resolveStoredImage(entry.imageBase64);
+
+    setState(prev => ({
+      ...prev,
+      aspectRatio: entry.settings.aspectRatio,
+      imageSize: entry.settings.imageSize,
+      useReferenceImages: entry.settings.useReferenceImages,
+      pixelArtGrid: entry.settings.pixelArtGrid ?? prev.pixelArtGrid,
+      cameraAngle: entry.settings.cameraAngle ?? 'none',
+      cameraLens: entry.settings.cameraLens ?? 'none',
+      // 픽셀 정규화 설정 — 구버전 히스토리엔 없으므로 현재 값을 유지한다
+      pixelate: entry.settings.pixelate ?? prev.pixelate,
+      pixelateSize: entry.settings.pixelateSize ?? prev.pixelateSize,
+      pixelatePaletteSize: entry.settings.pixelatePaletteSize ?? prev.pixelatePaletteSize,
+      additionalPrompt: entry.additionalPrompt ?? prev.additionalPrompt,
+      generatedImage: restoredHistoryImage,
+    }));
+
+    alert('설정이 복원되었습니다. 프롬프트를 수정한 후 "이미지 생성"을 클릭하세요.');
+  }, [resolveStoredImage]);
+
+  // 히스토리 삭제 요청
+
+  // 히스토리 핀 토글 (useCallback으로 안정화)
+  const handleTogglePin = useCallback((e: React.MouseEvent, entryId: string) => {
+    e.stopPropagation();
+    if (!onHistoryUpdate) return;
+
+    const entry = generationHistory.find((h) => h.id === entryId);
+    if (!entry) return;
+
+    onHistoryUpdate(entryId, { isPinned: !entry.isPinned });
+    logger.debug(`📌 히스토리 핀 토글: ${entryId}, 새 상태: ${!entry.isPinned}`);
+  }, [onHistoryUpdate, generationHistory]);
+
+  return (
+    <div className="h-full flex flex-col bg-gray-50">
+      {/* 헤더 */}
+      <div className="bg-white border-b border-gray-200 px-4 py-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {onBack && (
+              <button
+                type="button"
+                onClick={onBack}
+                className="flex items-center gap-2 px-3 py-2 hover:bg-gray-100 rounded-lg transition-colors text-gray-700"
+                title="분석 화면으로 돌아가기"
+              >
+                <ArrowLeft size={18} className="text-gray-600 flex-shrink-0" />
+                <span className="text-sm font-medium">이미지 분석</span>
+              </button>
+            )}
+          </div>
+          {/* 자동 저장 폴더 열기 버튼 (v0.4.4) */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={async () => {
+                try {
+                  const root = await getAiGenRoot();
+                  await openPath(root);
+                } catch (error) {
+                  logger.error('❌ 저장 폴더 열기 실패:', error);
+                  alert('저장 폴더를 열지 못했습니다.');
+                }
+              }}
+              onMouseEnter={() => setShowPathTooltip(true)}
+              onMouseLeave={() => setShowPathTooltip(false)}
+              className="relative flex items-center gap-2 px-3 py-2 bg-green-50 border border-green-200 rounded-lg hover:bg-green-100 transition-colors"
+              title="탐색기에서 저장 폴더 열기"
+            >
+              <FolderOpen size={16} className="text-green-600" />
+              <span className="text-sm text-green-700 font-medium max-w-xs truncate">
+                AI_Gen
+              </span>
+
+              {/* 커스텀 툴팁 */}
+              {showPathTooltip && (
+                <div className="absolute top-full right-0 mt-2 z-50 pointer-events-none">
+                  <div className="bg-gray-900 text-white text-xs rounded-lg shadow-xl px-3 py-2 whitespace-nowrap">
+                    <div className="font-semibold mb-1">저장 위치 (클릭하여 열기):</div>
+                    <div className="text-gray-300">
+                      ~/Downloads/AI_Gen/
+                    </div>
+                  </div>
+                </div>
+              )}
+            </button>
+
+            {/* 줌 컨트롤 */}
+            {generatedImage && (
+              <div className="relative">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowZoomMenu(!showZoomMenu);
+                  }}
+                  className="flex items-center gap-2 px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                >
+                  <ZoomIn size={18} />
+                  <span className="text-sm font-medium">
+                    {zoomLevel === 'fit' ? '화면에 맞춤' : zoomLevel === 'actual' ? '원본 크기' : `${zoomLevel}%`}
+                  </span>
+                  <ChevronDown size={16} />
+                </button>
+
+                {/* 줌 드롭다운 메뉴 */}
+                {showZoomMenu && (
+                  <div
+                    onClick={(e) => e.stopPropagation()}
+                    className="absolute top-full mt-2 right-0 bg-white border border-gray-200 rounded-lg shadow-xl z-50 py-2 min-w-[180px]"
+                  >
+                    <button
+                      onClick={() => {
+                        setZoomLevel('fit');
+                        setShowZoomMenu(false);
+                      }}
+                      className={`w-full px-4 py-2 text-left text-sm hover:bg-gray-100 transition-colors ${
+                        zoomLevel === 'fit' ? 'bg-purple-50 text-purple-700 font-semibold' : 'text-gray-700'
+                      }`}
+                    >
+                      화면에 맞춤
+                    </button>
+                    <button
+                      onClick={() => {
+                        setZoomLevel('actual');
+                        setShowZoomMenu(false);
+                      }}
+                      className={`w-full px-4 py-2 text-left text-sm hover:bg-gray-100 transition-colors ${
+                        zoomLevel === 'actual' ? 'bg-purple-50 text-purple-700 font-semibold' : 'text-gray-700'
+                      }`}
+                    >
+                      원본 크기 (100%)
+                    </button>
+                    <div className="border-t border-gray-200 my-2"></div>
+                    {[25, 50, 75, 100, 150, 200, 300].map((level) => (
+                      <button
+                        key={level}
+                        onClick={() => {
+                          setZoomLevel(level);
+                          setShowZoomMenu(false);
+                        }}
+                        className={`w-full px-4 py-2 text-left text-sm hover:bg-gray-100 transition-colors ${
+                          zoomLevel === level ? 'bg-purple-50 text-purple-700 font-semibold' : 'text-gray-700'
+                        }`}
+                      >
+                        {level}%
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex-1 flex overflow-hidden">
+        {/* 왼쪽: 결과 표시 및 히스토리 */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {/* 결과 표시 영역 */}
+          {sessionType === 'TILEMAP' ? (
+            <TilemapResultView
+              isGenerating={isGenerating}
+              progressMessage={progressMessage}
+              generatedImage={generatedImage}
+              grid={tilemap.displayGrid}
+              mode={tilemap.effectiveMode}
+              composedSheet={tilemap.composedSheet}
+              autoExportFolder={lastAutoExportFolder}
+              isRecomposing={tilemap.isRecomposing}
+              needsRecompose={tilemap.needsRecompose}
+              currentTiles={tilemap.currentTiles}
+              baseTiles={tilemap.baseTiles}
+              baseTransparent={tilemap.baseTransparent}
+              slotAssignments={tilemapData?.slotAssignments ?? []}
+              onToggleLock={tilemap.toggleLock}
+              onReshuffleSelected={tilemap.reshuffleSlots}
+              onExport={handleTilemapExport}
+              onManualSave={handleManualSave}
+            />
+          ) : (
+            <GeneratorPreview
+              isGenerating={isGenerating}
+              progressMessage={progressMessage}
+              generatedImage={generatedImage}
+              zoomLevel={zoomLevel}
+              onManualSave={handleManualSave}
+            />
+          )}
+
+          {/* 히스토리 섹션 */}
+          <GeneratorHistory
+            generationHistory={generationHistory}
+            historyHeight={historyHeight}
+            onHistoryResize={handleHistoryResize}
+            onRestoreFromHistory={handleRestoreFromHistory}
+            onTogglePin={handleTogglePin}
+            onDeleteHistory={onHistoryDelete}
+          />
+
+        </div>
+
+        {/* 오른쪽: 설정 패널 */}
+        <GeneratorSettings
+          apiKey={apiKey}
+          sessionType={sessionType}
+          additionalPrompt={additionalPrompt}
+          isGenerating={isGenerating}
+          isTranslating={isTranslating}
+          progressMessage={progressMessage}
+          aspectRatio={aspectRatio}
+          imageSize={imageSize}
+          useReferenceImages={useReferenceImages}
+          pixelArtGrid={pixelArtGrid}
+          pixelate={pixelate}
+          pixelateSize={pixelateSize}
+          pixelatePaletteSize={pixelatePaletteSize}
+          tilemapMode={tilemapMode}
+          tilemapBaseTerrain={tilemapBaseTerrain}
+          tilemapOverlayTerrain={tilemapOverlayTerrain}
+          tilemapEdgeStyle={tilemapEdgeStyle}
+          tilemapOutline={tilemapOutline}
+          tilemapOutline2={tilemapOutline2}
+          tilemapOutlineSide={tilemapOutlineSide}
+          showHelp={showHelp}
+          imageModel={imageModel}
+          imageQuality={imageQuality}
+          availableModels={sessionType === 'TILEMAP' ? getTilemapImageModels() : getAvailableImageModels()}
+          supportedAspectRatios={getImageModelDefinition(imageModel).supports.aspectRatios}
+          supportedQualities={getImageModelDefinition(imageModel).supports.qualities}
+          canUseTransparentBackground={canUseTransparentBackground}
+          transparentBackground={transparentBackground}
+          canUseSketch={canUseSketch}
+          sketchThumb={conceptSketch?.sketchPng ?? null}
+          onOpenSketch={() => setShowSketchPanel(true)}
+          onClearSketch={() => setConceptSketch(null)}
+          supportedImageSizes={getImageModelDefinition(imageModel).supports.imageSizes}
+          cameraAngle={cameraAngle}
+          cameraLens={cameraLens}
+          referenceDocuments={referenceDocuments}
+          onGenerate={handleGenerate}
+          onAdditionalPromptChange={setAdditionalPrompt}
+          onAspectRatioChange={setAspectRatio}
+          onImageSizeChange={setImageSize}
+          onUseReferenceImagesChange={setUseReferenceImages}
+          onPixelArtGridChange={setPixelArtGrid}
+          onPixelateChange={setPixelate}
+          onPixelateSizeChange={setPixelateSize}
+          onPixelatePaletteSizeChange={setPixelatePaletteSize}
+          onTilemapModeChange={setTilemapMode}
+          onTilemapBaseTerrainChange={setTilemapBaseTerrain}
+          onTilemapOverlayTerrainChange={setTilemapOverlayTerrain}
+          onTilemapEdgeStyleChange={setTilemapEdgeStyle}
+          onTilemapOutlineChange={setTilemapOutline}
+          onTilemapOutline2Change={setTilemapOutline2}
+          onTilemapOutlineSideChange={setTilemapOutlineSide}
+          onShowHelpChange={setShowHelp}
+          onImageModelChange={setImageModel}
+          onImageQualityChange={setImageQuality}
+          onTransparentBackgroundChange={setTransparentBackground}
+          onCameraAngleChange={setCameraAngle}
+          onCameraLensChange={setCameraLens}
+          onDocumentAdd={onDocumentAdd}
+          onDocumentDelete={onDocumentDelete}
+        />
+      </div>
+
+
+      {/* 구도 스케치 모달 — ILLUSTRATION의 스케치 패널을 그대로 재사용한다.
+          그쪽은 캐릭터 라벨을 붙이지만 여기서는 등록 캐릭터가 없으므로 자유 라벨 모드로 뜬다 */}
+      {canUseSketch && (
+        <ConceptSketchPanel
+          open={showSketchPanel}
+          apiKey={apiKey}
+          // 캔버스를 출력 비율과 같게 — 그린 프레이밍이 그대로 결과 프레이밍이 된다
+          aspectRatio={aspectRatio}
+          initial={conceptSketch ?? undefined}
+          onClose={() => setShowSketchPanel(false)}
+          onSave={(sketch) => setConceptSketch(sketch)}
+        />
+      )}
+
+      {/* 도움말 팝업 */}
+      {showHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white border border-gray-200 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
+            {/* 헤더 */}
+            <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <HelpCircle size={24} className="text-purple-600" />
+                <h3 className="text-lg font-semibold">고급 설정 도움말</h3>
+              </div>
+              <button
+                onClick={() => setShowHelp(false)}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* 내용 */}
+            <div className="p-6 space-y-6">
+              {/* Seed */}
+              <div>
+                <h4 className="text-base font-semibold text-gray-800 mb-2 flex items-center gap-2">
+                  <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-sm">Seed</span>
+                  <span>재현성 제어</span>
+                </h4>
+                <p className="text-sm text-gray-700 leading-relaxed mb-2">
+                  동일한 Seed 값을 사용하면 같은 설정에서 동일한 결과를 재현할 수 있습니다.
+                </p>
+                <ul className="text-sm text-gray-600 space-y-1 ml-4">
+                  <li>• <strong>값 지정:</strong> 특정 결과를 재현하고 싶을 때 사용</li>
+                  <li>• <strong>비워두기:</strong> 매번 다른 랜덤 결과 생성</li>
+                  <li>• <strong>팁:</strong> 좋은 결과가 나온 Seed 값을 저장해두면 유용합니다</li>
+                </ul>
+              </div>
+
+              {/* Temperature */}
+              <div>
+                <h4 className="text-base font-semibold text-gray-800 mb-2 flex items-center gap-2">
+                  <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-sm">Temperature</span>
+                  <span>창의성 vs 일관성</span>
+                </h4>
+                <p className="text-sm text-gray-700 leading-relaxed mb-2">
+                  이미지 생성 시 AI의 창의성 정도를 조절합니다.
+                </p>
+                <ul className="text-sm text-gray-600 space-y-1 ml-4">
+                  <li>• <strong>낮은 값 (0.0~0.8):</strong> 일관적이고 예측 가능한 결과, 참조 이미지에 가까움</li>
+                  <li>• <strong>중간 값 (0.8~1.2):</strong> 균형잡힌 창의성과 일관성</li>
+                  <li>• <strong>높은 값 (1.2~2.0):</strong> 창의적이고 다양한 결과, 예측 불가능</li>
+                  <li>• <strong>권장:</strong> 캐릭터 유지는 0.8, 새로운 디자인은 1.2</li>
+                </ul>
+              </div>
+
+              {/* Top-K */}
+              <div>
+                <h4 className="text-base font-semibold text-gray-800 mb-2 flex items-center gap-2">
+                  <span className="px-2 py-1 bg-green-100 text-green-700 rounded text-sm">Top-K</span>
+                  <span>샘플링 범위</span>
+                </h4>
+                <p className="text-sm text-gray-700 leading-relaxed mb-2">
+                  AI가 선택할 수 있는 상위 토큰의 개수를 제한합니다.
+                </p>
+                <ul className="text-sm text-gray-600 space-y-1 ml-4">
+                  <li>• <strong>낮은 값 (1~30):</strong> 가장 확실한 선택만, 보수적이고 안전한 결과</li>
+                  <li>• <strong>중간 값 (30~60):</strong> 적절한 다양성 유지</li>
+                  <li>• <strong>높은 값 (60~100):</strong> 더 많은 선택지, 다양하고 실험적인 결과</li>
+                  <li>• <strong>권장:</strong> 일반적으로 40이 적절, 다양성 원하면 60</li>
+                </ul>
+              </div>
+
+              {/* Top-P */}
+              <div>
+                <h4 className="text-base font-semibold text-gray-800 mb-2 flex items-center gap-2">
+                  <span className="px-2 py-1 bg-orange-100 text-orange-700 rounded text-sm">Top-P</span>
+                  <span>누적 확률 임계값</span>
+                </h4>
+                <p className="text-sm text-gray-700 leading-relaxed mb-2">
+                  누적 확률이 이 값에 도달할 때까지의 토큰만 고려합니다 (Nucleus Sampling).
+                </p>
+                <ul className="text-sm text-gray-600 space-y-1 ml-4">
+                  <li>• <strong>낮은 값 (0.5~0.8):</strong> 가장 확실한 선택만, 일관된 결과</li>
+                  <li>• <strong>중간 값 (0.8~0.95):</strong> 균형잡힌 다양성</li>
+                  <li>• <strong>높은 값 (0.95~1.0):</strong> 거의 모든 선택지 고려, 매우 다양한 결과</li>
+                  <li>• <strong>권장:</strong> 0.95가 적절, Top-K와 함께 사용하면 효과적</li>
+                </ul>
+              </div>
+
+              {/* Reference Strength */}
+              <div>
+                <h4 className="text-base font-semibold text-gray-800 mb-2 flex items-center gap-2">
+                  <span className="px-2 py-1 bg-pink-100 text-pink-700 rounded text-sm">Reference Strength</span>
+                  <span>참조 영향력</span>
+                </h4>
+                <p className="text-sm text-gray-700 leading-relaxed mb-2">
+                  참조 이미지가 생성 결과에 미치는 영향력을 조절합니다.
+                </p>
+                <ul className="text-sm text-gray-600 space-y-1 ml-4">
+                  <li>• <strong>낮은 값 (0.0~0.5):</strong> 영감만 받음, 자유로운 해석</li>
+                  <li>• <strong>중간 값 (0.5~0.8):</strong> 스타일이나 구도만 유지</li>
+                  <li>• <strong>높은 값 (0.8~1.0):</strong> 참조 이미지와 매우 유사하게</li>
+                  <li>• <strong>권장:</strong> 캐릭터 유지는 0.95, 스타일만 0.6, 변형은 0.85</li>
+                </ul>
+              </div>
+
+              {/* 프리셋 설명 */}
+              <div className="bg-gradient-to-r from-purple-50 to-blue-50 rounded-lg p-4 border border-purple-200">
+                <h4 className="text-base font-semibold text-gray-800 mb-3">💡 프리셋 활용 팁</h4>
+                <div className="space-y-2 text-sm text-gray-700">
+                  <p><strong>🎭 포즈/표정/동작 베리에이션:</strong> Reference Strength 0.95, Temperature 0.8 → 캐릭터 외형은 그대로 유지하면서 포즈만 변경</p>
+                  <p><strong>👥 다양한 캐릭터 디자인:</strong> Reference Strength 0.6, Temperature 1.2 → 스타일은 유지하되 완전히 새로운 캐릭터 생성</p>
+                  <p><strong>👗 헤어/의상/악세사리 변경:</strong> Reference Strength 0.85, Temperature 1.0 → 캐릭터의 기본 외형은 유지하면서 스타일 요소만 변경</p>
+                </div>
+              </div>
+
+              {/* Negative Prompt 안내 */}
+              <div className="bg-yellow-50 rounded-lg p-4 border border-yellow-200">
+                <h4 className="text-base font-semibold text-gray-800 mb-2 flex items-center gap-2">
+                  ⚠️ Negative Prompt 설정
+                </h4>
+                <p className="text-sm text-gray-700">
+                  Negative Prompt는 이미지 분석 패널의 "부정 프롬프트 카드"에서만 수정할 수 있습니다.
+                  이는 일관된 품질을 유지하기 위해 고정된 값을 사용하도록 설계되었습니다.
+                </p>
+              </div>
+            </div>
+
+            {/* 푸터 */}
+            <div className="sticky bottom-0 bg-white border-t border-gray-200 p-4">
+              <button
+                onClick={() => setShowHelp(false)}
+                className="w-full px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-700 text-white transition-colors font-medium"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

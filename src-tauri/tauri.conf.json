@@ -1,0 +1,65 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ai-style-studio",
+  "version": "1.0.0",
+  "identifier": "com.zzamjak.ai-style-studio",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "AI Style Studio",
+        "width": 1400,
+        "height": 900,
+        "maximized": true,
+        "resizable": true,
+        "fullscreen": false,
+        "focus": true,
+        "visible": true,
+        "decorations": true,
+        "alwaysOnTop": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "publisher": "Jinpyoung Choi",
+    "homepage": "https://github.com/zzamjak-cloud/AI_Style_Studio",
+    "copyright": "Copyright (C) 2026 최진평 (Jinpyoung Choi)",
+    "license": "GPL-3.0-or-later",
+    "licenseFile": "../LICENSE",
+    "resources": [
+      "binaries/*"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUyODNCMzJBMkI5MjZCQkIKUldTN2E1SXJLck9ENHFkQ0U5NHlQanF3Y3dtOGd1TXdyT2JNYmZsc1lBV3Mxd0lHMVZxMGgxYXIK",
+      "endpoints": [
+        "https://github.com/zzamjak-cloud/AI_Style_Studio/releases/download/latest/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}
