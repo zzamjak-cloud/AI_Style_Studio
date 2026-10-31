@@ -579,7 +579,7 @@ function GeneratorSettingsComponent({
               레이아웃을 지키지 못한다). 키가 없을 때의 경고는 그대로 남긴다 */}
           {sessionType === 'TILEMAP' && !apiKey.trim() && (
             <p className="text-xs text-amber-600">
-              이미지 생성에는 OpenRouter API Key가 필요합니다. 헤더의 설정 아이콘에서 입력해 주세요.
+              이미지 생성에는 API Key(OpenRouter·Gemini·OpenAI 중 하나)가 필요합니다. 헤더의 설정 아이콘에서 입력해 주세요.
             </p>
           )}
           <div>

@@ -3,8 +3,8 @@ import { Session, GenerationHistoryEntry } from '../types/session';
 import { ReferenceDocument } from '../types/referenceDocument';
 import { ImageAnalysisResult } from '../types/analysis';
 import {
-  loadOpenRouterApiKey,
-  saveOpenRouterApiKey,
+  loadProviderApiKeys,
+  saveProviderApiKeys,
   loadSessions,
   backfillStoredSessionsIfNeeded,
   pruneSessionFolderMapToSessions,
@@ -21,9 +21,17 @@ import {
   persistSessions,
 } from '../utils/sessionHelpers';
 import { logger } from '../lib/logger';
+import {
+  setProviderKeys,
+  hasAnyApiKey,
+  toAppApiKey,
+  type ProviderKeys,
+} from '../lib/api/providerKeys';
 
 interface UseSessionManagementReturn {
   apiKey: string;
+  /** 설정 모달 표시용 제공사별 원본 키 */
+  providerKeys: ProviderKeys;
   setApiKey: (key: string) => void;
   sessions: Session[];
   setSessions: React.Dispatch<React.SetStateAction<Session[]>>;
@@ -32,7 +40,7 @@ interface UseSessionManagementReturn {
   showSettings: boolean;
   setShowSettings: (show: boolean) => void;
   initializeApp: () => Promise<void>;
-  handleSaveApiKeys: (newApiKey: string) => Promise<void>;
+  handleSaveApiKeys: (newKeys: ProviderKeys) => Promise<void>;
   handleSelectSession: (session: Session) => void;
   handleDeleteSession: (sessionId: string) => Promise<void>;
   handleExportSession: (session: Session) => Promise<void>;
@@ -51,6 +59,7 @@ interface UseSessionManagementReturn {
  */
 export function useSessionManagement(): UseSessionManagementReturn {
   const [apiKey, setApiKeyState] = useState('');
+  const [providerKeys, setProviderKeysState] = useState<ProviderKeys>({ openrouter: '', gemini: '', openai: '' });
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -58,9 +67,11 @@ export function useSessionManagement(): UseSessionManagementReturn {
   // 앱 시작 시 API 키 및 세션 로드
   const initializeApp = async () => {
     try {
-      const savedApiKey = await loadOpenRouterApiKey();
-      if (savedApiKey) {
-        setApiKeyState(savedApiKey);
+      const savedKeys = await loadProviderApiKeys();
+      setProviderKeys(savedKeys);
+      setProviderKeysState(savedKeys);
+      if (hasAnyApiKey(savedKeys)) {
+        setApiKeyState(toAppApiKey(savedKeys));
       } else {
         setShowSettings(true);
       }
@@ -95,11 +106,13 @@ export function useSessionManagement(): UseSessionManagementReturn {
     setApiKeyState(key);
   };
 
-  const handleSaveApiKeys = async (newApiKey: string) => {
+  const handleSaveApiKeys = async (newKeys: ProviderKeys) => {
     try {
-      await saveOpenRouterApiKey(newApiKey);
-      setApiKeyState(newApiKey);
-      logger.info('✅ OpenRouter API 키 저장 성공');
+      await saveProviderApiKeys(newKeys);
+      setProviderKeys(newKeys);
+      setProviderKeysState(newKeys);
+      setApiKeyState(toAppApiKey(newKeys));
+      logger.info('✅ API 키 저장 성공');
     } catch (error) {
       logger.error('❌ API 키 저장 오류:', error);
       throw error; // 상위 컴포넌트에서 처리하도록 에러 전파
@@ -351,6 +364,7 @@ export function useSessionManagement(): UseSessionManagementReturn {
 
   return {
     apiKey,
+    providerKeys,
     setApiKey,
     sessions,
     setSessions,

@@ -1,15 +1,17 @@
 # API 공통 — 에러 처리 · 번역 · 키/경로
 
-앱의 외부 API 호출은 **v0.6부터 전부 OpenRouter 통합 키 하나**로 나간다(회사 정책 — Gemini/OpenAI 개별 키 폐기). 텍스트/비전은 `chat/completions`, 이미지 생성은 `images` 엔드포인트를 쓴다. **표준화된 API 에러 파싱/사용자 메시지 변환**(`apiErrorHandler`), **한↔영 자동 번역**(`useGeminiTranslator`, 이미지 프롬프트용), **생성 결과물 저장 경로**(`config/paths`)를 다룬다. API 키는 사용자가 설정에서 입력하며 Tauri `store` 에 영속된다.
+앱의 외부 API 호출은 **OpenRouter 통합 키 또는 Gemini/OpenAI 직접 키**로 나간다(하나 이상 입력). 경로는 `chatComplete`/`generateImagesViaOpenRouter` 내부에서 모델별로 정해진다 — **원 제공사 직접 키 → OpenRouter 키 → (텍스트만) 다른 직접 키의 대체 모델**. 이미지 모델은 대체하지 않고 키가 없으면 에러. 텍스트/비전은 `chat/completions`, 이미지 생성은 `images` 엔드포인트를 쓴다. **표준화된 API 에러 파싱/사용자 메시지 변환**(`apiErrorHandler`), **한↔영 자동 번역**(`useGeminiTranslator`, 이미지 프롬프트용), **생성 결과물 저장 경로**(`config/paths`)를 다룬다. API 키는 사용자가 설정에서 입력하며 Tauri `store` 에 영속된다.
 
 ## 관련 파일
 - `src/lib/api/openrouter.ts` — OpenRouter 공통 클라이언트. `OPENROUTER_BASE_URL`(`https://openrouter.ai/api/v1`), `openrouterHeaders`(Bearer + `X-OpenRouter-Title`), `chatComplete`(텍스트/비전, `finish_reason` 처리 — `length`/`content_filter` 는 항상 에러), `toImagePart`(data URL→image_url 파트), `generateImageViaOpenRouter`(Image API)
+- `src/lib/api/providerKeys.ts` — 제공사별 키 레지스트리(`setProviderKeys`/`getProviderKeys`), 슬러그→제공사(`providerOfModel`)·직접 모델 ID(`toDirectModelId`, 접두사 제거). 직접 키만 있을 때 앱 `apiKey` 자리에 `DIRECT_KEYS_ONLY_MARKER` 를 넣어 호출부 `!apiKey` 가드를 통과시킨다(Bearer 로 전송되지 않음 — `resolveOpenRouterKey`)
+- `src/lib/api/directProviders.ts` — 직접 API. 텍스트: Gemini OpenAI 호환 레이어(`/v1beta/openai/chat/completions`)·OpenAI `chat/completions`(`max_completion_tokens`). 이미지: Gemini `generateContent`(`responseModalities:['IMAGE']`, `imageConfig`), OpenAI `images/generations`·참조 있으면 `images/edits`(multipart `image[]`). 대체 텍스트 모델 `DIRECT_TEXT_FALLBACK_MODEL`
 - `src/lib/apiErrorHandler.ts` — API 에러 파싱·메시지·로깅. `parseApiError`/`getUserFriendlyErrorMessage`/`handleApiError`/`extractErrorFromResponse`
 - `src/hooks/api/useGeminiTranslator.ts` — 한↔영 번역 훅 (`chatComplete` + Gemini Flash)
 - `src/lib/config/paths.ts` — 결과물 저장 폴더 경로 헬퍼(`~/Downloads/AI_Gen/`)
-- `src/lib/storage.ts` — API 키 영속(`saveOpenRouterApiKey`/`loadOpenRouterApiKey`, store 키 `openrouter_api_key`. 저장 시 레거시 `gemini_api_key`/`openai_api_key` 항목 삭제)
-- `src/components/common/SettingsModal.tsx` — OpenRouter API 키 단일 입력 UI(`wiki/ui/overview.md`)
-- `src-tauri/capabilities/default.json` — `openrouter.ai` HTTP allow
+- `src/lib/storage.ts` — API 키 영속(`saveProviderApiKeys`/`loadProviderApiKeys`, store 키 `openrouter_api_key`/`gemini_api_key`/`openai_api_key`. 빈 값은 항목 삭제)
+- `src/components/common/SettingsModal.tsx` — OpenRouter·Gemini·OpenAI 키 3필드 입력 UI(`wiki/ui/overview.md`)
+- `src-tauri/capabilities/default.json` — `openrouter.ai`·`generativelanguage.googleapis.com`·`api.openai.com` HTTP allow
 
 ## 데이터 모델
 
@@ -60,7 +62,7 @@ ApiError = { message: string, code?: string | number, status?: number, details?:
 
 ## API 키 / 저장 경로 (config/paths.ts)
 
-**키**: OpenRouter 통합 키 1개를 `SettingsModal` 에서 입력 → `store` 영속(`useSessionManagement` 가 로드·전달, App 이 `apiKey` prop 으로 각 패널에 배선). `.env` 의 `VITE_*` 는 **OAuth 전용**. **구버전 키(`gemini_api_key`/`openai_api_key`)는 자동 이관되지 않으므로** 업데이트 후 사용자가 OpenRouter 키를 새로 입력해야 한다(키가 없으면 설정 모달 자동 오픈).
+**키**: OpenRouter·Gemini·OpenAI 키를 `SettingsModal` 에서 입력(하나 이상) → `store` 영속. `useSessionManagement` 가 로드해 `setProviderKeys` 로 레지스트리에 넣고, App 은 `toAppApiKey` 결과를 `apiKey` prop 으로 각 패널에 배선(원본 키는 `providerKeys` 로 설정 모달에만). `.env` 의 `VITE_*` 는 **OAuth 전용**. 키가 하나도 없으면 설정 모달 자동 오픈. **OpenAI 직접 경로 차이**: 비율은 표준 size 3종(1024², 1536×1024, 1024×1536)으로, 품질 `xhigh`/`max` 는 `high` 로 수렴. MCP 서버도 같은 세 키를 `settings.json` 에서 읽어 같은 레지스트리로 라우팅한다(`mcp/src/env.ts`, `wiki/infra/mcp.md`).
 
 **결과물 폴더**(`paths.ts`, Tauri `path`/`fs` 사용):
 - `AI_GEN_ROOT_SEGMENT = 'AI_Gen'`, `SESSIONS_SEGMENT = 'Sessions'`

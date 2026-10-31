@@ -99,7 +99,7 @@ export function formatImageApiError(status: number, errorText: string): string {
   const rawMessage = parsed?.error?.message ?? errorText;
 
   if (status === 401) {
-    return '🔑 OpenRouter API Key가 올바르지 않거나 만료되었습니다. 설정에서 키를 확인하세요.';
+    return '🔑 API Key가 올바르지 않거나 만료되었습니다. 설정에서 키를 확인하세요.';
   }
   if (status === 402) {
     return '💳 OpenRouter 크레딧이 부족합니다. openrouter.ai에서 잔액을 확인하세요.';

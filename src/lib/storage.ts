@@ -1,4 +1,5 @@
 import { Store } from '@tauri-apps/plugin-store';
+import type { ProviderKeys } from './api/providerKeys';
 import { save, open } from '@tauri-apps/plugin-dialog';
 import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs';
 import { Session } from '../types/session';
@@ -40,29 +41,38 @@ export async function pruneSessionFolderMapToSessions(sessionIds: string[]): Pro
   );
 }
 
-// OpenRouter 통합 API 키 저장 (Gemini/OpenAI 개별 키를 대체)
-export async function saveOpenRouterApiKey(apiKey: string): Promise<void> {
+// 제공사별 API 키 저장 — 빈 값은 항목을 삭제해 해당 경로를 끈다
+export async function saveProviderApiKeys(keys: ProviderKeys): Promise<void> {
   const store = await getStore();
-  const cleanApiKey = apiKey.trim(); // 공백 제거
-  await store.set('openrouter_api_key', cleanApiKey);
-  // 개별 provider 키 시절의 항목은 더 이상 사용하지 않으므로 제거
-  await store.delete('gemini_api_key');
-  await store.delete('openai_api_key');
+  const entries: [string, string][] = [
+    ['openrouter_api_key', keys.openrouter.trim()],
+    ['gemini_api_key', keys.gemini.trim()],
+    ['openai_api_key', keys.openai.trim()],
+  ];
+  for (const [storeKey, value] of entries) {
+    if (value) await store.set(storeKey, value);
+    else await store.delete(storeKey);
+  }
   await store.save();
-  logger.debug('✅ OpenRouter API 키 저장 완료');
-  logger.debug('   - 키 길이:', cleanApiKey.length);
+  logger.debug('✅ API 키 저장 완료:', entries.filter(([, v]) => v).map(([k]) => k).join(', ') || '없음');
 }
 
-// OpenRouter 통합 API 키 불러오기
-export async function loadOpenRouterApiKey(): Promise<string | null> {
+// 제공사별 API 키 불러오기 (없는 항목은 빈 문자열)
+export async function loadProviderApiKeys(): Promise<ProviderKeys> {
   try {
     const store = await getStore();
-    const apiKey = await store.get<string>('openrouter_api_key');
-    logger.debug('📦 OpenRouter API 키 로드:', apiKey ? '존재함' : '없음');
-    return apiKey || null;
+    const read = async (storeKey: string) => {
+      const value = await store.get<string>(storeKey);
+      return typeof value === 'string' ? value.trim() : '';
+    };
+    return {
+      openrouter: await read('openrouter_api_key'),
+      gemini: await read('gemini_api_key'),
+      openai: await read('openai_api_key'),
+    };
   } catch (error) {
-    logger.error('OpenRouter API 키 로드 오류:', error);
-    return null;
+    logger.error('API 키 로드 오류:', error);
+    return { openrouter: '', gemini: '', openai: '' };
   }
 }
 

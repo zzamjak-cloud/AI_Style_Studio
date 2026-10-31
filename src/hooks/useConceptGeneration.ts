@@ -40,7 +40,7 @@ export function useConceptGeneration(apiKey: string) {
 
       const selectedModel = normalizeImageModelId(params.settings.model);
       if (!apiKey.trim()) {
-        throw new Error('OpenRouter API 키가 비어 있습니다. 설정에서 API 키를 확인해주세요.');
+        throw new Error('API 키가 비어 있습니다. 설정에서 API 키를 확인해주세요.');
       }
 
       const imageBase64 = await new Promise<string>((resolve, reject) => {

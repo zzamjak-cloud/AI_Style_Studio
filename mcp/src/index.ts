@@ -3,7 +3,7 @@
  *
  * Claude Code·Codex 같은 로컬 에이전트가 AI Style Studio 의 세션별 생성 기능(생성기 세션·컨셉·일러스트·
  * 편집 체인·타일맵, 참조 분석·문서)을 앱 없이 대량으로 쓰게 한다.
- * - 앱이 꺼져 있어도 동작한다. OpenRouter 키는 앱 설정(settings.json)에서 읽는다.
+ * - 앱이 꺼져 있어도 동작한다. API 키(OpenRouter·Gemini·OpenAI)는 앱 설정(settings.json)에서 읽는다.
  * - 결과는 파일로만 남긴다. 앱 데이터에는 쓰지 않는다.
  * - 프롬프트·분석·모델 정의·합성기는 앱 소스(`src/`)를 그대로 번들해 앱과 어긋나지 않는다.
  * - stdout 은 MCP 프로토콜 전용이다. 진단은 stderr 로만 낸다 (stdio-guard 가 첫 import).
@@ -32,7 +32,8 @@ import {
   apiKeySource,
   assertWritable,
   defaultOutputRoot,
-  getApiKey,
+  apiKeyStatus,
+  getOpenRouterKey,
   hasApiKey,
   listSessions,
   resolveDataDir,
@@ -86,7 +87,7 @@ const server = new McpServer(
   { name: 'ai-style-studio', version: VERSION },
   {
     instructions: [
-      'AI Style Studio(AI 게임 아트 앱)의 세션별 이미지 생성 기능을 대량 배치로 쓰는 서버다. 앱이 꺼져 있어도 앱 설정의 OpenRouter 키로 동작하며 결과는 파일로만 저장한다.',
+      'AI Style Studio(AI 게임 아트 앱)의 세션별 이미지 생성 기능을 대량 배치로 쓰는 서버다. 앱이 꺼져 있어도 앱 설정의 API 키(OpenRouter·Gemini·OpenAI 직접 키)로 동작하며 결과는 파일로만 저장한다.',
       '세션별 도구: ss_generate_batch(스타일·캐릭터·배경·아이콘·UI·로고·픽셀아트) · ss_concept_batch(게임 컨셉 아트) · ss_illustration_batch(다중 캐릭터 일러스트) · ss_edit_chain(대화형 이어서 편집) · ss_tilemap_batch(타일맵 변형 세트·룰타일 → 유니티용 타일).',
       '권장 흐름: ss_models(모델·옵션 확인) → [필요 시] ss_analyze(참조 이미지 → 스타일 프로필, 1회) → 각 도구를 dry_run=true 로 호출해 요청 수·견적 확인 → 실행 → ss_job_status 로 진행 확인.',
       '비용 절감: 같은 종류 여러 개(아이콘·포즈 목록)는 ss_generate_batch 의 tasks[].items 에 나열하라 — 그리드 셀에 나눠 담아 호출 1회로 여러 개를 얻고 셀별 파일로 자른다. 같은 프롬프트의 여러 장은 count 를 쓰면 gpt 계열은 요청 1회에 최대 10장. 품질은 low < medium < high 순으로 비싸다.',
@@ -101,16 +102,17 @@ const server = new McpServer(
 server.registerTool(
   'ss_info',
   {
-    description: '서버 상태: 앱 데이터 경로, OpenRouter 키 설정 여부·출처와 크레딧, 기본 출력 폴더, 진행 중 작업.',
+    description: '서버 상태: 앱 데이터 경로, API 키(OpenRouter·Gemini·OpenAI) 설정 여부·출처와 OpenRouter 크레딧, 기본 출력 폴더, 진행 중 작업.',
     inputSchema: {},
   },
   () =>
     guarded(async () => {
       let credit: unknown = null;
-      if (hasApiKey(dataDir)) {
+      const openrouterKey = getOpenRouterKey(dataDir);
+      if (openrouterKey) {
         try {
           const res = await fetch(`${OPENROUTER_BASE_URL}/key`, {
-            headers: openrouterHeaders(getApiKey(dataDir)),
+            headers: openrouterHeaders(openrouterKey),
             signal: AbortSignal.timeout(15_000),
           });
           const body = (await res.json()) as { data?: Record<string, unknown> };
@@ -126,6 +128,8 @@ server.registerTool(
         api_key_configured: hasApiKey(dataDir),
         // env 면 OPENROUTER_API_KEY 환경변수 계정으로 과금된다 (앱에 저장된 키가 아님)
         api_key_source: apiKeySource(),
+        // 제공사별 설정 여부 — 직접 키가 있는 제공사 모델은 OpenRouter 를 거치지 않는다(크레딧 조회 대상 아님)
+        api_keys: apiKeyStatus(dataDir),
         credit,
         default_output_dir: defaultOutputRoot(),
         state_dir: stateDir(),

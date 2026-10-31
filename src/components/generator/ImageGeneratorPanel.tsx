@@ -647,7 +647,7 @@ export function ImageGeneratorPanel({
 
   const handleGenerate = async () => {
     if (!apiKey) {
-      alert('OpenRouter API 키를 먼저 설정해주세요. Style Studio 헤더의 설정 아이콘에서 입력할 수 있습니다.');
+      alert('API 키(OpenRouter·Gemini·OpenAI)를 먼저 설정해주세요. Style Studio 헤더의 설정 아이콘에서 입력할 수 있습니다.');
       return;
     }
 

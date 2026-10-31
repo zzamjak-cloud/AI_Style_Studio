@@ -4,43 +4,84 @@ import { openPath, openUrl } from '@tauri-apps/plugin-opener';
 import { getVersion } from '@tauri-apps/api/app';
 import { getAiGenRoot } from '../../lib/config/paths';
 import { McpSettingsSection } from './McpSettingsSection';
+import { hasAnyApiKey, type ProviderKeys } from '../../lib/api/providerKeys';
+
+// 제공사별 키 입력 필드 정의
+const KEY_FIELDS: {
+  id: keyof ProviderKeys;
+  label: string;
+  placeholder: string;
+  url: string;
+  linkLabel: string;
+  help: string;
+}[] = [
+  {
+    id: 'openrouter',
+    label: 'OpenRouter API Key',
+    placeholder: 'sk-or-...',
+    url: 'https://openrouter.ai/settings/keys',
+    linkLabel: 'OpenRouter',
+    help: '통합 키 하나로 Gemini/OpenAI 모델을 모두 사용합니다.',
+  },
+  {
+    id: 'gemini',
+    label: 'Google Gemini API Key',
+    placeholder: 'AIza...',
+    url: 'https://aistudio.google.com/apikey',
+    linkLabel: 'Google AI Studio',
+    help: 'Gemini 모델(이미지·분석·번역)을 Google API로 직접 호출합니다.',
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI API Key',
+    placeholder: 'sk-...',
+    url: 'https://platform.openai.com/api-keys',
+    linkLabel: 'OpenAI Platform',
+    help: 'GPT Image 모델을 OpenAI API로 직접 호출합니다.',
+  },
+];
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  currentApiKey: string;
-  onSave: (apiKey: string) => void;
+  currentKeys: ProviderKeys;
+  onSave: (keys: ProviderKeys) => void;
 }
 
 export const SettingsModal = memo(function SettingsModal({
   isOpen,
   onClose,
-  currentApiKey,
+  currentKeys,
   onSave,
 }: SettingsModalProps) {
-  const [apiKey, setApiKey] = useState(currentApiKey);
+  const [keys, setKeys] = useState<ProviderKeys>(currentKeys);
   const [saveNotification, setSaveNotification] = useState<string | null>(null);
   const [version, setVersion] = useState('');
   const [showAbout, setShowAbout] = useState(false);
 
   useEffect(() => {
-    setApiKey(currentApiKey);
-  }, [currentApiKey]);
+    setKeys(currentKeys);
+  }, [currentKeys]);
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => setVersion('0.0.0'));
   }, []);
 
   const handleSave = () => {
-    if (apiKey.trim()) {
-      onSave(apiKey.trim());
+    const trimmed: ProviderKeys = {
+      openrouter: keys.openrouter.trim(),
+      gemini: keys.gemini.trim(),
+      openai: keys.openai.trim(),
+    };
+    if (hasAnyApiKey(trimmed)) {
+      onSave(trimmed);
       setSaveNotification('설정이 저장되었습니다');
       setTimeout(() => {
         setSaveNotification(null);
         onClose();
       }, 1500);
     } else {
-      alert('API Key를 입력해주세요');
+      alert('API Key를 하나 이상 입력해주세요');
     }
   };
 
@@ -87,28 +128,35 @@ export const SettingsModal = memo(function SettingsModal({
 
         {/* 본문 */}
         <div className="p-6 space-y-6 max-h-[65vh] overflow-y-auto">
-          {/* API Key 설정 */}
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
-              OpenRouter API Key
-            </label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-or-..."
-              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-            />
-            <p className="text-xs text-gray-500 mt-2">
-              <a
-                href="https://openrouter.ai/settings/keys"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-purple-600 hover:underline"
-              >
-                OpenRouter
-              </a>
-              에서 발급한 통합 키 하나로 Gemini/OpenAI 모델을 모두 사용합니다.
+          {/* API Key 설정 — 하나 이상 입력. 직접 키가 있으면 해당 제공사 모델은 직접 호출 */}
+          <div className="space-y-4">
+            {KEY_FIELDS.map((field) => (
+              <div key={field.id}>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  {field.label}
+                </label>
+                <input
+                  type="password"
+                  value={keys[field.id]}
+                  onChange={(e) => setKeys((prev) => ({ ...prev, [field.id]: e.target.value }))}
+                  placeholder={field.placeholder}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                />
+                <p className="text-xs text-gray-500 mt-2">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenUrl(field.url)}
+                    className="text-purple-600 hover:underline"
+                  >
+                    {field.linkLabel}
+                  </button>
+                  에서 발급. {field.help}
+                </p>
+              </div>
+            ))}
+            <p className="text-xs text-gray-500 p-3 bg-gray-50 border border-gray-200 rounded-lg leading-relaxed">
+              키는 하나 이상 입력하면 됩니다. Gemini/OpenAI 키가 있으면 해당 모델은 직접 API를 우선 사용하고,
+              없으면 OpenRouter 키로 호출합니다. 번역·분석은 Gemini 키(또는 OpenRouter)가 없으면 OpenAI 텍스트 모델로 대체됩니다.
             </p>
           </div>
 

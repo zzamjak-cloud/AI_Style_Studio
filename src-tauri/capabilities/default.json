@@ -98,6 +98,12 @@
       "allow": [
         {
           "url": "https://openrouter.ai/*"
+        },
+        {
+          "url": "https://generativelanguage.googleapis.com/*"
+        },
+        {
+          "url": "https://api.openai.com/*"
         }
       ]
     }

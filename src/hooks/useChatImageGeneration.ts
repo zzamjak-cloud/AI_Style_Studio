@@ -78,7 +78,7 @@ export function useChatImageGeneration(
     if (!apiKey) {
       setIsGenerating(false);
       setGenerationStatus('');
-      throw new Error('OpenRouter API 키가 설정되지 않았습니다.');
+      throw new Error('API 키가 설정되지 않았습니다. 설정에서 키를 입력하세요.');
     }
     const aspectRatio = settings?.aspectRatio ?? '1:1';
     const imageSize = settings?.imageSize ?? '1K';
@@ -228,7 +228,7 @@ export function useChatImageGeneration(
     messagesToSummarize: ChatMessage[],
     existingSummary?: string
   ): Promise<string> => {
-    if (!apiKey) throw new Error('OpenRouter API 키가 설정되지 않았습니다.');
+    if (!apiKey) throw new Error('API 키가 설정되지 않았습니다. 설정에서 키를 입력하세요.');
 
     const conversationText = messagesToSummarize
       .filter(m => m.role !== 'summary')

@@ -614,7 +614,7 @@ export function ConceptSketchPanel({
               onClick={handleAnalyze}
               disabled={isAnalyzing || !apiKey}
               className="flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white rounded-lg font-medium text-sm"
-              title={!apiKey ? 'OpenRouter API Key가 필요합니다' : '스케치를 분석하여 layout/perspective/placements 추출'}
+              title={!apiKey ? 'API Key가 필요합니다 (설정에서 입력)' : '스케치를 분석하여 layout/perspective/placements 추출'}
             >
               {isAnalyzing ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
               {isAnalyzing ? '분석 중...' : 'AI로 분석'}

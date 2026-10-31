@@ -1,8 +1,9 @@
 /**
  * AI Style Studio 앱 데이터 접근 (헤드리스)
  *
- * - API 키: 앱이 `settings.json`(Tauri plugin-store)에 저장한 `openrouter_api_key` 를 읽는다.
- *   환경변수 `OPENROUTER_API_KEY` 가 있으면 그것을 우선한다. **키는 어떤 응답에도 싣지 않는다.**
+ * - API 키: 앱이 `settings.json`(Tauri plugin-store)에 저장한 `openrouter_api_key`·`gemini_api_key`·
+ *   `openai_api_key` 를 읽어 공유 클라이언트의 키 레지스트리에 넣는다. 직접 키가 있는 제공사 모델은 직접 API 로 간다.
+ *   환경변수 `OPENROUTER_API_KEY` 가 있으면 OpenRouter 키만 그것을 우선한다. **키는 어떤 응답에도 싣지 않는다.**
  * - 세션: 기존 세션의 분석 결과·참조 이미지를 "스타일 소스"로 재사용하기 위해 읽기만 한다.
  *   앱 데이터에는 절대 쓰지 않는다. → wiki/infra/mcp.md
  */
@@ -11,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileS
 import { homedir, platform } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { ImageAnalysisResult } from '../../src/types/analysis';
+import { hasAnyApiKey, setProviderKeys, toAppApiKey, type ProviderKeys } from '../../src/lib/api/providerKeys';
 
 /** Tauri 번들 식별자 — 앱 데이터 디렉토리 이름 (`tauri.conf.json` 의 `identifier`) */
 export const BUNDLE_IDENTIFIER = 'com.zzamjak.ai-style-studio';
@@ -182,25 +184,65 @@ function readSettings(dataDir: string): Record<string, unknown> {
   return value;
 }
 
-/** OpenRouter API 키. 없으면 사용자가 할 일을 담은 오류를 던진다. */
-export function getApiKey(dataDir: string): string {
-  const fromEnv = process.env.OPENROUTER_API_KEY?.trim();
-  if (fromEnv) return fromEnv;
-  let key: unknown;
+/**
+ * 제공사별 키. OpenRouter 만 환경변수 우선 — Gemini/OpenAI 는 셸에 흔히 깔린 범용 환경변수
+ * (`OPENAI_API_KEY` 등)가 다른 계정으로 과금하지 않도록 앱 설정만 읽는다.
+ */
+export function getProviderKeysFor(dataDir: string): ProviderKeys {
+  let settings: Record<string, unknown>;
   try {
-    key = readSettings(dataDir).openrouter_api_key;
+    settings = readSettings(dataDir);
   } catch (error) {
-    throw new Error(`OpenRouter API 키를 읽을 수 없습니다: ${(error as Error).message}`);
+    throw new Error(`API 키를 읽을 수 없습니다: ${(error as Error).message}`);
   }
-  if (typeof key !== 'string' || !key.trim()) {
-    throw new Error('AI Style Studio 설정에 OpenRouter API 키가 없습니다. 앱 설정에서 키를 저장하세요.');
+  const read = (key: string) => {
+    const value = settings[key];
+    return typeof value === 'string' ? value.trim() : '';
+  };
+  return {
+    openrouter: process.env.OPENROUTER_API_KEY?.trim() || read('openrouter_api_key'),
+    gemini: read('gemini_api_key'),
+    openai: read('openai_api_key'),
+  };
+}
+
+/**
+ * 공유 클라이언트에 넘길 키. 레지스트리를 최신 설정으로 갱신한 뒤, OpenRouter 키 또는
+ * 직접 키만 있을 때의 표식을 돌려준다. 키가 하나도 없으면 사용자가 할 일을 담은 오류를 던진다.
+ */
+export function getApiKey(dataDir: string): string {
+  const keys = getProviderKeysFor(dataDir);
+  if (!hasAnyApiKey(keys)) {
+    throw new Error(
+      'AI Style Studio 설정에 API 키가 없습니다. 앱 설정에서 OpenRouter·Gemini·OpenAI 중 하나 이상의 키를 저장하세요.'
+    );
   }
-  return key.trim();
+  setProviderKeys(keys);
+  return toAppApiKey(keys);
+}
+
+/** 크레딧 조회용 실제 OpenRouter 키 (없으면 빈 값) */
+export function getOpenRouterKey(dataDir: string): string {
+  try {
+    return getProviderKeysFor(dataDir).openrouter;
+  } catch {
+    return '';
+  }
 }
 
 /** 키 출처 — 환경변수가 앱 키를 덮어쓰면 다른 계정으로 과금되므로 ss_info 로 알린다 */
 export function apiKeySource(): 'env' | 'settings' {
   return process.env.OPENROUTER_API_KEY?.trim() ? 'env' : 'settings';
+}
+
+/** 제공사별 키 설정 여부 (값은 싣지 않는다) */
+export function apiKeyStatus(dataDir: string): Record<keyof ProviderKeys, boolean> {
+  try {
+    const keys = getProviderKeysFor(dataDir);
+    return { openrouter: !!keys.openrouter, gemini: !!keys.gemini, openai: !!keys.openai };
+  } catch {
+    return { openrouter: false, gemini: false, openai: false };
+  }
 }
 
 export function hasApiKey(dataDir: string): boolean {

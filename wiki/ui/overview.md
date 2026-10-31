@@ -14,8 +14,8 @@
 
 ## SettingsModal
 
-설정 모달(`SettingsModal.tsx`). props: `isOpen`, `onClose`, `currentApiKey`, `onSave(apiKey)`.
-- OpenRouter 통합 API 키 단일 입력(password 필드, openrouter.ai 발급 링크 포함)
+설정 모달(`SettingsModal.tsx`). props: `isOpen`, `onClose`, `currentKeys: ProviderKeys`, `onSave(keys)`.
+- OpenRouter·Gemini·OpenAI 키 3필드(`KEY_FIELDS`, password, 발급 링크). 하나 이상 입력해야 저장
 - 생성 이미지 저장 위치 안내 + "폴더 열기"(`getAiGenRoot` → `openPath`) (`:152-174`)
 - 앱 버전 표시(`getVersion()`, 실패 시 `0.0.0`) (`:35-37, 219`)
 - **저장 검증**: 키 비어있으면 alert, 아니면 저장 후 1.5초 뒤 자동 닫힘

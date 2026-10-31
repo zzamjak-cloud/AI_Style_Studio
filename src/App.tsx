@@ -203,6 +203,7 @@ function App() {
 
   const {
     apiKey,
+    providerKeys,
     sessions,
     setSessions,
     currentSession,
@@ -1547,7 +1548,7 @@ function App() {
       <SettingsModal
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
-        currentApiKey={apiKey}
+        currentKeys={providerKeys}
         onSave={handleSaveApiKeys}
       />
 

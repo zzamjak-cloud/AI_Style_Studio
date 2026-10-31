@@ -1,8 +1,8 @@
 # AI 에이전트 연동 (MCP 서버 `ss-mcp`) — 대량 배치 생성
 
 로컬 AI 에이전트(Claude Code CLI·데스크톱, Codex CLI·데스크톱, Claude 데스크톱)가 StyleStudio 의
-**세션별 생성 기능을 대량 배치로** 쓰게 하는 MCP stdio 서버. 앱이 **꺼져 있어도** 앱 설정의 OpenRouter
-키로 동작하며, 결과는 **파일로만** 남긴다(세션을 만들지 않는다).
+**세션별 생성 기능을 대량 배치로** 쓰게 하는 MCP stdio 서버. 앱이 **꺼져 있어도** 앱 설정의 API 키
+(OpenRouter·Gemini·OpenAI — 직접 키가 있으면 해당 제공사 모델은 직접 API)로 동작하며, 결과는 **파일로만** 남긴다(세션을 만들지 않는다).
 
 - 서버는 TypeScript(`mcp/`)이고 **앱 소스(`src/`)를 그대로 번들**한다 — 세션 프롬프트 템플릿·분석 프롬프트·
   모델 카탈로그·OpenRouter 클라이언트·픽셀 정규화·타일맵 합성기가 앱과 같은 코드라 어긋나지 않는다.
@@ -45,7 +45,7 @@
 
 | 도구 | 용도 | API 호출 |
 |------|------|---------|
-| `ss_info` | 데이터 경로, 키 설정 여부·출처(env/settings), 크레딧(`/api/v1/key`), 기본 출력 폴더, 작업 목록 | 키 조회 1회 |
+| `ss_info` | 데이터 경로, 키 설정 여부·출처(env/settings)·제공사별 `api_keys`, 크레딧(`/api/v1/key`), 기본 출력 폴더, 작업 목록 | 키 조회 1회 |
 | `ss_models` | 모델별 지원 옵션(`imageModels.ts` 그대로), 세션 타입별 기능, 카메라 id, 컨셉 프리셋, 실측 평균 비용 | 없음 |
 | `ss_list_sessions` | 화풍 재사용용 기존 세션 목록 (`has_analysis`, `reference_count`) | 없음 |
 | `ss_analyze` | 참조 이미지 → 앱 분석기(`useGeminiAnalyzer`) → **스타일 프로필 JSON**. 타일맵은 `session_type=TILEMAP` | 분석 1회 |
@@ -202,7 +202,7 @@ Codex 경로는 **앱 프로세스의** `CODEX_HOME` 을 따른다 — 셸 rc �
 ## 안전장치 · 함정
 
 - **앱 데이터에 쓰지 않는다.** 모든 쓰기(배치 출력·task 하위 폴더·`ss_analyze` 프로필·`ss_split_grid`/`ss_pixelate`)가 `env.assertWritable` 을 지난다 — `app_data_dir` 와 `app_local_data_dir`(웹뷰·MCP 사본) 안이면 거부. 판정은 문자열 접두사가 아니라 실제 경로(`realpathSync.native`, 존재하는 조상까지) + `path.relative` 관계라 형제 폴더(`…-tauri-exports`) 오탐과 junction·8.3 이름 우회가 없다. 모든 파일은 `writeUnique`(`wx`, `_2`…)로만 쓴다 — `ss_analyze` 의 `save_path` 도 `.json` 만, 덮어쓰기 없음.
-- **API 키는 어떤 응답에도 싣지 않는다.** `OPENROUTER_API_KEY` 환경변수가 있으면 우선 — 다른 계정으로 과금될 수 있어 `ss_info.api_key_source`(env|settings)로 출처를 알린다.
+- **API 키는 어떤 응답에도 싣지 않는다.** `OPENROUTER_API_KEY` 환경변수가 있으면 OpenRouter 키만 우선(Gemini/OpenAI 는 셸의 범용 `OPENAI_API_KEY` 등이 다른 계정으로 과금하지 않게 앱 설정만 읽는다. `getProviderKeysFor` → `getApiKey` 가 공유 레지스트리 갱신) — 다른 계정으로 과금될 수 있어 `ss_info.api_key_source`(env|settings)로 출처를 알린다.
 - 기존 세션을 스타일 소스로 쓸 때 참조 이미지는 `imageKeys` 우선·같은 인덱스 인라인 폴백(앱 `loadSessions` 와 같은 규칙), 키는 `/`·`\`·`..`·`:` 포함 시 거부.
   **새 세션은 빈 문자열로 채운 더미 분석을 가진다** — `hasMeaningfulAnalysis` 로 걸러야 빈 분석이 프롬프트에 섞이지 않는다.
 - 번들된 앱 코드가 `console.log` 를 쓰면 stdout(JSON-RPC)이 깨진다 → `stdio-guard.ts` 가 **첫 import** 로 stderr 로 돌린다. import 순서를 바꾸지 말 것.

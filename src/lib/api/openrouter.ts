@@ -1,9 +1,18 @@
 // OpenRouter 통합 API 클라이언트
 // - 텍스트/비전: POST /api/v1/chat/completions (OpenAI 호환)
 // - 이미지 생성: POST /api/v1/images (전용 Image API, input_references 지원)
-// 회사 정책에 따라 Gemini/OpenAI 개별 키 대신 OpenRouter 통합 키 하나만 사용한다.
+// Gemini/OpenAI 직접 키가 설정돼 있으면 해당 제공사 모델은 직접 API 로 보내고(providerKeys),
+// 없으면 OpenRouter 통합 키로 보낸다.
 
 import { logger } from '../logger';
+import {
+  getProviderKeys,
+  providerOfModel,
+  resolveOpenRouterKey,
+  toDirectModelId,
+  type DirectProvider,
+} from './providerKeys';
+import { DIRECT_TEXT_FALLBACK_MODEL, directChatEndpoint, generateImagesDirect } from './directProviders';
 
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
@@ -57,29 +66,63 @@ export function toImagePart(imageDataUrlOrBase64: string): ChatImagePart {
  * 텍스트 응답을 반환하는 chat completions 호출.
  * finish_reason이 length/content_filter면 상황을 알 수 있는 에러를 던진다.
  */
-export async function chatComplete(apiKey: string, params: ChatCompleteParams): Promise<string> {
-  const cleanApiKey = String(apiKey || '').trim();
-  if (!cleanApiKey) {
-    throw new Error('API Key가 비어있습니다');
+interface ChatRoute {
+  url: string;
+  headers: Record<string, string>;
+  model: string;
+  maxTokensField: 'max_tokens' | 'max_completion_tokens';
+}
+
+/**
+ * 텍스트 요청 경로 결정: 원 제공사 직접 키 → OpenRouter → 다른 직접 키(대체 모델).
+ * 텍스트 모델은 대체해도 기능이 같으므로 마지막 단계까지 허용한다.
+ */
+function resolveChatRoute(apiKey: string, model: string): ChatRoute {
+  const keys = getProviderKeys();
+  const provider = providerOfModel(model);
+  const direct = (p: DirectProvider, directModel: string): ChatRoute => ({
+    ...directChatEndpoint(p, keys[p]),
+    model: directModel,
+  });
+
+  if (provider && keys[provider]) return direct(provider, toDirectModelId(model));
+
+  const openrouterKey = resolveOpenRouterKey(apiKey) || keys.openrouter;
+  if (openrouterKey) {
+    return {
+      url: `${OPENROUTER_BASE_URL}/chat/completions`,
+      headers: openrouterHeaders(openrouterKey),
+      model,
+      maxTokensField: 'max_tokens',
+    };
   }
 
+  const fallback: DirectProvider | null = keys.gemini ? 'gemini' : keys.openai ? 'openai' : null;
+  if (fallback) return direct(fallback, DIRECT_TEXT_FALLBACK_MODEL[fallback]);
+
+  throw new Error('API Key가 비어있습니다. 설정에서 OpenRouter·Gemini·OpenAI 중 하나의 키를 입력하세요.');
+}
+
+export async function chatComplete(apiKey: string, params: ChatCompleteParams): Promise<string> {
+  const route = resolveChatRoute(apiKey, params.model);
+
   const body: Record<string, unknown> = {
-    model: params.model,
+    model: route.model,
     messages: params.messages,
   };
   if (params.maxTokens !== undefined) {
-    body.max_tokens = params.maxTokens;
+    body[route.maxTokensField] = params.maxTokens;
   }
 
-  const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+  const response = await fetch(route.url, {
     method: 'POST',
-    headers: openrouterHeaders(cleanApiKey),
+    headers: route.headers,
     body: JSON.stringify(body),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    logger.error('❌ OpenRouter API 오류:', response.status, errorText);
+    logger.error('❌ Chat API 오류:', route.url, response.status, errorText);
     throw new Error(`API 오류 (${response.status}): ${errorText}`);
   }
 
@@ -87,7 +130,7 @@ export async function chatComplete(apiKey: string, params: ChatCompleteParams): 
   const choice = result?.choices?.[0];
 
   if (!choice) {
-    throw new Error('OpenRouter 응답에 choices가 없습니다. API 키나 요청을 확인하세요.');
+    throw new Error('API 응답에 choices가 없습니다. API 키나 요청을 확인하세요.');
   }
 
   const finishReason: string | undefined = choice.finish_reason;
@@ -105,7 +148,7 @@ export async function chatComplete(apiKey: string, params: ChatCompleteParams): 
     );
   }
   if (!text) {
-    throw new Error('OpenRouter 응답에 텍스트가 없습니다. 다시 시도해주세요.');
+    throw new Error('API 응답에 텍스트가 없습니다. 다시 시도해주세요.');
   }
 
   return text;
@@ -172,9 +215,21 @@ export async function generateImagesViaOpenRouter(
   apiKey: string,
   request: ImageApiRequest
 ): Promise<GeneratedImageBatch> {
-  const cleanApiKey = String(apiKey || '').trim();
+  // 원 제공사 직접 키가 있으면 직접 API 로 보낸다 (이미지 모델은 대체 불가)
+  const keys = getProviderKeys();
+  const provider = providerOfModel(request.model);
+  if (provider && keys[provider]) {
+    const direct = await generateImagesDirect(provider, keys[provider], {
+      ...request,
+      model: toDirectModelId(request.model),
+    });
+    return { images: direct.images, usage: direct.usage };
+  }
+
+  const cleanApiKey = resolveOpenRouterKey(apiKey) || keys.openrouter;
   if (!cleanApiKey) {
-    throw new Error('API Key가 비어있습니다');
+    const needed = provider === 'gemini' ? 'Gemini' : provider === 'openai' ? 'OpenAI' : '해당 제공사';
+    throw new Error(`이 모델을 쓰려면 설정에서 ${needed} API 키 또는 OpenRouter API 키를 입력하세요.`);
   }
 
   const body: Record<string, unknown> = {

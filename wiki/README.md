@@ -98,7 +98,7 @@ AI 게임 아트 제작 데스크톱 앱(React 19 + Tauri v2)의 AI 탐색용 �
 | Claude Code·Codex로 세션 기능 대량 배치 생성 / MCP 도구·비용 견적 / ss-mcp 빌드(Bun)·번들 | `infra/mcp.md` |
 | MCP 등록 버튼이 비활성(ss-mcp 없음) / 앱 업데이트 후 에이전트가 구버전 서버 사용 | `infra/mcp.md` |
 | API 에러가 영문 raw로 노출 / 402·429 메시지 안 뜸 | `api/overview.md` |
-| 번역이 원문 그대로 나옴 / 배치 번역 순서 어긋남 / API 키 없이 호출 | `api/overview.md` |
+| 번역이 원문 그대로 나옴 / 배치 번역 순서 어긋남 / API 키 없이 호출 / Gemini·OpenAI 직접 키 라우팅 | `api/overview.md` |
 | 확인창이 안 뜨거나 무한 대기 / Enter·ESC 무반응 | `ui/overview.md` |
 | 설정 저장 버튼 눌러도 안 닫힘 / 이미지가 placeholder에서 안 넘어감 | `ui/overview.md` |
 | 리사이즈가 안 멈춤 / 진행 토스트 안 보임 / 에러 대신 흰 화면 | `ui/overview.md` |
