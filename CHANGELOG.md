@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-01
+
 ### Added
 
 - **Gemini·OpenAI API Key 직접 입력**: 설정에서 OpenRouter 외에 Google Gemini API Key와 OpenAI API Key를 입력할 수 있습니다. 하나 이상만 입력하면 됩니다.
