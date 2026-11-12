@@ -77,7 +77,9 @@ export type ImageGenerationModel =
   | 'google/gemini-3.1-flash-lite-image'
   | 'openai/gpt-image-2'
   | 'openai/gpt-image-2.5-flare'
-  | 'openai/gpt-image-2.5-sunburst';
+  | 'openai/gpt-image-2.5-sunburst'
+  | 'openai/gpt-image-2.6-flare'
+  | 'openai/gpt-image-2.6-sunburst';
 
 export type GeminiImageGenerationModel =
   | 'google/gemini-3-pro-image-preview'
@@ -163,6 +165,43 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   {
     id: 'openai/gpt-image-2.5-sunburst',
     label: '덕테이프 2.5 선버스트',
+    provider: 'openai',
+    availability: 'available',
+    annotationMode: 'composite',
+    supports: {
+      aspectRatios: GPT_IMAGE_ASPECT_RATIOS,
+      imageSizes: ['1K'],
+      qualities: ['low', 'medium', 'high', 'xhigh', 'max'],
+      maxReferenceImages: 16,
+      maxImagesPerRequest: 10,
+      transparentBackground: true,
+    },
+  },
+  /*
+    2026-11-12 OpenRouter 등재 확인 (`/api/v1/images/models` 실측):
+      aspect_ratio · quality(xhigh·max 포함) · background(transparent 포함) · n 1~10 · input_references 0~16
+      → 2.5 계열과 동일. 추가로 output_format(png/jpeg/webp/gif)이 열렸지만 앱은 쓰지 않는다.
+    플레어는 2.5 대비 약 50% 빠른 생성(OpenAI 발표), 선버스트는 반복 편집 간 디테일 일관성 강화.
+    재확인: curl -s https://openrouter.ai/api/v1/images/models | jq '.data[] | select(.id|test("2.6"))'
+  */
+  {
+    id: 'openai/gpt-image-2.6-flare',
+    label: '덕테이프 2.6 플레어',
+    provider: 'openai',
+    availability: 'available',
+    annotationMode: 'composite',
+    supports: {
+      aspectRatios: GPT_IMAGE_ASPECT_RATIOS,
+      imageSizes: ['1K'],
+      qualities: ['low', 'medium', 'high', 'xhigh', 'max'],
+      maxReferenceImages: 16,
+      maxImagesPerRequest: 10,
+      transparentBackground: true,
+    },
+  },
+  {
+    id: 'openai/gpt-image-2.6-sunburst',
+    label: '덕테이프 2.6 선버스트',
     provider: 'openai',
     availability: 'available',
     annotationMode: 'composite',

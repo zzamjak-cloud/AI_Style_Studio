@@ -19,6 +19,8 @@ ImageGenerationModel =
   | 'openai/gpt-image-2'                     // 덕테이프 (available — 기본 모델)
   | 'openai/gpt-image-2.5-flare'             // 덕테이프 2.5 플레어  (available — 속도 우선)
   | 'openai/gpt-image-2.5-sunburst'          // 덕테이프 2.5 선버스트 (available — 정밀 우선)
+  | 'openai/gpt-image-2.6-flare'             // 덕테이프 2.6 플레어 (available — 2.5 대비 약 50% 빠름)
+  | 'openai/gpt-image-2.6-sunburst'          // 덕테이프 2.6 선버스트 (available — 편집 간 일관성)
   | 'google/gemini-3-pro-image-preview'      // 나노바나나 프로
   | 'google/gemini-3.1-flash-image-preview'  // 나노바나나2
   | 'google/gemini-3.1-flash-lite-image'     // 나노바나나 2 라이트 (1K 전용)
@@ -57,6 +59,8 @@ ImageModelDefinition = {
 | input_references | 0~16 |
 | resolution | 없음 |
 
+2026-11-12 실측 — gpt-image-2.6 계열: 위 2.5 표와 파라미터 동일 + `output_format` png/jpeg/webp/gif(앱은 미사용, GIF 애니메이션 섹션은 품질 문제로 보류). 단가는 이미지 출력 $30/1M·이미지 입력 $8/1M·텍스트 입력 $5/1M 토큰.
+
 두 티어(flare/sunburst)는 파라미터와 토큰 단가가 완전히 동일하다. 차이는 정밀(sunburst) vs 속도(flare)뿐 — 별도 능력치 분기가 아니라 라벨과 용도 설명일 뿐이다.
 
 - 앱이 노출하는 비율은 10종(`1:1 3:2 2:3 4:3 3:4 4:5 5:4 16:9 9:16 21:9`). flash 계열만 지원하는 초극단 비율(1:4·1:8·4:1·8:1)은 **일부러 뺐다** — 모델을 바꿀 때마다 선택이 튕기고 게임 아트 용도가 드물다. 필요하면 해당 모델의 `aspectRatios`에만 추가하면 UI가 따라온다.
@@ -65,7 +69,7 @@ ImageModelDefinition = {
 
 ### pending — 등재 대기 모델
 
-`availability: 'pending'`은 **모델은 존재하지만 OpenRouter에 아직 등재되지 않은** 상태다(현재 카탈로그에는 없음 — 6종 모두 등재돼 `available`이다). 정의만 넣어 두고 `getAvailableImageModels()`가 걸러 UI에서 감춘다. 등재되는 날 값 하나를 `available`로 바꾸면 드롭다운·비율·품질이 전부 따라온다.
+`availability: 'pending'`은 **모델은 존재하지만 OpenRouter에 아직 등재되지 않은** 상태다(현재 카탈로그에는 없음 — 8종 모두 등재돼 `available`이다). 정의만 넣어 두고 `getAvailableImageModels()`가 걸러 UI에서 감춘다. 등재되는 날 값 하나를 `available`로 바꾸면 드롭다운·비율·품질이 전부 따라온다.
 
 > **`retired` 상태는 없다(롤백됨).** 2026-09-12에 `openai/gpt-image-2`를 gpt-image-2.5로 대체하려고 `retired`·`RETIRED_MODEL_SUCCESSOR`·`normalizeImageModelId`의 자동 승격 로직을 잠깐 도입했으나, 같은 날 타일맵 변형 세트를 실제로 뽑아 비교한 결과 2.5가 재질 스케일·변형 랜덤성 양쪽에서 퇴보하는 것이 확인돼 전부 되돌렸다. `ModelAvailability`는 다시 `'available'|'pending'` 두 값뿐이고, 저장된 모델은 항상 그대로 유지된다(예외 없음). 근거는 `tilemap/overview.md`의 "고정값" 절 참조.
 

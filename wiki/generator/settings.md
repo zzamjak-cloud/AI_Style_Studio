@@ -12,18 +12,20 @@
 
 ## 모델 선택
 
-`availableModels`를 `모델` 라벨과 같은 줄의 **단일 드롭다운**으로 렌더. 부모가 세션에 따라 목록을 갈아 끼운다 — 일반 세션은 `getAvailableImageModels()`(6종), **TILEMAP은 `getTilemapImageModels()`(덕테이프 계열 3종)**. 예전에는 TILEMAP에서 드롭다운 자체를 숨겼지만, 계열 안에서 2.0↔2.5를 비교할 수 있어야 해서 목록을 좁히는 방식으로 바꿨다 → `tilemap/overview.md`.
+`availableModels`를 `모델` 라벨과 같은 줄의 **단일 드롭다운**으로 렌더. 부모가 세션에 따라 목록을 갈아 끼운다 — 일반 세션은 `getAvailableImageModels()`(8종), **TILEMAP은 `getTilemapImageModels()`(덕테이프 계열 5종)**. 예전에는 TILEMAP에서 드롭다운 자체를 숨겼지만, 계열 안에서 2.0↔2.5를 비교할 수 있어야 해서 목록을 좁히는 방식으로 바꿨다 → `tilemap/overview.md`.
 
 | id | 라벨 | provider | 비율 | 해상도 | 품질 | 참조 | n | 투명배경 |
 |----|------|----------|------|--------|------|------|---|---|
 | `openai/gpt-image-2` | 덕테이프 **(기본)** | openai | 8종 | — (1K 고정) | low/medium/high | 16 | 10 | — |
 | `openai/gpt-image-2.5-flare` | 덕테이프 2.5 플레어 | openai | 8종 | — | low/medium/high/xhigh/max | 16 | 10 | ✓ |
 | `openai/gpt-image-2.5-sunburst` | 덕테이프 2.5 선버스트 | openai | 8종 | — | low/medium/high/xhigh/max | 16 | 10 | ✓ |
+| `openai/gpt-image-2.6-flare` | 덕테이프 2.6 플레어 | openai | 8종 | — | low/medium/high/xhigh/max | 16 | 10 | ✓ |
+| `openai/gpt-image-2.6-sunburst` | 덕테이프 2.6 선버스트 | openai | 8종 | — | low/medium/high/xhigh/max | 16 | 10 | ✓ |
 | `google/gemini-3-pro-image-preview` | 나노바나나 프로 | gemini | 10종 | 1K/2K/4K | medium | 14 | 1 | — |
 | `google/gemini-3.1-flash-image-preview` | 나노바나나2 | gemini | 10종 | 1K/2K/4K | medium | 14 | 1 | — |
 | `google/gemini-3.1-flash-lite-image` | 나노바나나 2 라이트 | gemini | 10종 | 1K | medium | 14 | 1 | — |
 
-- **6종 모두 `availability: 'available'`** — `ModelAvailability`는 `'available'|'pending'` 두 값뿐이고 현재 카탈로그에 `pending`은 없다. 2.5 두 티어는 여전히 드롭다운에서 사용자가 직접 고를 수 있지만(품질 xhigh/max·투명 배경 지원), 실제 생성 테스트(타일맵 변형)에서 재질 스케일·변형 랜덤성 회귀가 확인돼 기본값에서는 제외됐다 — 근거는 `tilemap/overview.md`.
+- **8종 모두 `availability: 'available'`** — `ModelAvailability`는 `'available'|'pending'` 두 값뿐이고 현재 카탈로그에 `pending`은 없다. 2.5 두 티어는 여전히 드롭다운에서 사용자가 직접 고를 수 있지만(품질 xhigh/max·투명 배경 지원), 실제 생성 테스트(타일맵 변형)에서 재질 스케일·변형 랜덤성 회귀가 확인돼 기본값에서는 제외됐다 — 근거는 `tilemap/overview.md`.
 - 기본 모델은 `DEFAULT_IMAGE_MODEL`(`openai/gpt-image-2`). v0.8.0에서 나노바나나 프로 → 덕테이프로 바뀐 뒤, 2026-09-12에 잠깐 2.5 선버스트로 옮겼다가 같은 날 되돌렸다.
 - **능력치는 전부 `supports`에서 온다.** UI에 모델 ID를 직접 비교하는 조건을 새로 만들지 말 것 — `isOpenAIModel()` / `supports.qualities.length > 1` / `supports.transparentBackground`를 쓴다.
 

@@ -51,7 +51,7 @@ ART_STYLE_PRESETS = 로우 폴리 / 카툰 렌더 / 셀 셰이딩 / 소프트 3D
 
 `ConceptRightPanel.tsx`:
 - 프롬프트 textarea 도 uncontrolled(ref). 히스토리 선택 시 `promptValue` 를 ref 에 직접 반영(:62).
-- 모델 옵션: `나노바나나 프로`/`나노바나나 2`/`나노바나나 2 라이트`/`덕테이프`/`덕테이프 2.5 플레어`/`덕테이프 2.5 선버스트` — 6종 모두 OpenRouter 통합 키로 사용 가능(`getAvailableImageModels()`).
+- 모델 옵션: `나노바나나 프로`/`나노바나나 2`/`나노바나나 2 라이트`/`덕테이프`/`덕테이프 2.5 플레어`/`덕테이프 2.5 선버스트`/`덕테이프 2.6 플레어`/`덕테이프 2.6 선버스트` — 8종 모두 OpenRouter 통합 키로 사용 가능(`getAvailableImageModels()`).
 - 비율·크기·그리드는 `getImageModelDefinition(settings.model)` 의 지원 목록 기준으로 활성화. 크기 2K/3K 클릭 시 **비용 경고 팝업**(2K≈4배, 3K≈9배) 확인 후 적용.
 
 ## 세션 저장 정책

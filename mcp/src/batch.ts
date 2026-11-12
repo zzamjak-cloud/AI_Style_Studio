@@ -97,7 +97,7 @@ export async function planGeneratorBatch(dataDir: string, input: BatchInput): Pr
 
   const transparent = !!opts.transparent_background;
   if (transparent && !model.supports.transparentBackground) {
-    throw new Error(`${model.label}(${model.id}) 는 투명 배경을 지원하지 않습니다. openai/gpt-image-2.5-flare 또는 -sunburst 를 쓰세요.`);
+    throw new Error(`${model.label}(${model.id}) 는 투명 배경을 지원하지 않습니다. openai/gpt-image-2.5·2.6 계열(-flare / -sunburst)을 쓰세요.`);
   }
   if (transparent && !usesWhiteBackground(sessionType)) {
     throw new Error('투명 배경은 CHARACTER/ICON/LOGO/PIXELART_CHARACTER/PIXELART_ICON 세션에서만 쓸 수 있습니다.');
