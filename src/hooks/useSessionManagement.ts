@@ -22,6 +22,7 @@ import {
 } from '../utils/sessionHelpers';
 import { logger } from '../lib/logger';
 import {
+  EMPTY_PROVIDER_KEYS,
   setProviderKeys,
   hasAnyApiKey,
   toAppApiKey,
@@ -59,7 +60,7 @@ interface UseSessionManagementReturn {
  */
 export function useSessionManagement(): UseSessionManagementReturn {
   const [apiKey, setApiKeyState] = useState('');
-  const [providerKeys, setProviderKeysState] = useState<ProviderKeys>({ openrouter: '', gemini: '', openai: '' });
+  const [providerKeys, setProviderKeysState] = useState<ProviderKeys>({ ...EMPTY_PROVIDER_KEYS });
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [showSettings, setShowSettings] = useState(false);

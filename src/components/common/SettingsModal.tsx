@@ -4,11 +4,11 @@ import { openPath, openUrl } from '@tauri-apps/plugin-opener';
 import { getVersion } from '@tauri-apps/api/app';
 import { getAiGenRoot } from '../../lib/config/paths';
 import { McpSettingsSection } from './McpSettingsSection';
-import { hasAnyApiKey, type ProviderKeys } from '../../lib/api/providerKeys';
+import { CLAUDE_TEXT_MODELS, hasAnyApiKey, type ProviderKeys } from '../../lib/api/providerKeys';
 
 // 제공사별 키 입력 필드 정의
 const KEY_FIELDS: {
-  id: keyof ProviderKeys;
+  id: 'openrouter' | 'gemini' | 'openai' | 'anthropic';
   label: string;
   placeholder: string;
   url: string;
@@ -38,6 +38,14 @@ const KEY_FIELDS: {
     url: 'https://platform.openai.com/api-keys',
     linkLabel: 'OpenAI Platform',
     help: 'GPT Image 모델을 OpenAI API로 직접 호출합니다.',
+  },
+  {
+    id: 'anthropic',
+    label: 'Anthropic (Claude) API Key',
+    placeholder: 'sk-ant-...',
+    url: 'https://platform.claude.com/settings/keys',
+    linkLabel: 'Claude Console',
+    help: 'Claude 모델로 참조 이미지를 분석합니다(이미지 생성은 미지원).',
   },
 ];
 
@@ -72,6 +80,8 @@ export const SettingsModal = memo(function SettingsModal({
       openrouter: keys.openrouter.trim(),
       gemini: keys.gemini.trim(),
       openai: keys.openai.trim(),
+      anthropic: keys.anthropic.trim(),
+      anthropicTextModel: keys.anthropicTextModel,
     };
     if (hasAnyApiKey(trimmed)) {
       onSave(trimmed);
@@ -152,11 +162,33 @@ export const SettingsModal = memo(function SettingsModal({
                   </button>
                   에서 발급. {field.help}
                 </p>
+                {field.id === 'anthropic' && (
+                  <div className="mt-3">
+                    <label className="block text-xs font-semibold text-gray-600 mb-1">
+                      Claude 텍스트 모델 (번역·요약 대체용)
+                    </label>
+                    <select
+                      value={keys.anthropicTextModel}
+                      onChange={(e) => setKeys((prev) => ({ ...prev, anthropicTextModel: e.target.value }))}
+                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    >
+                      {CLAUDE_TEXT_MODELS.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label} — {m.description}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Gemini·OpenAI·OpenRouter 키 없이 Claude 키만 있을 때 번역 등 텍스트 작업에 씁니다.
+                    </p>
+                  </div>
+                )}
               </div>
             ))}
             <p className="text-xs text-gray-500 p-3 bg-gray-50 border border-gray-200 rounded-lg leading-relaxed">
-              키는 하나 이상 입력하면 됩니다. Gemini/OpenAI 키가 있으면 해당 모델은 직접 API를 우선 사용하고,
-              없으면 OpenRouter 키로 호출합니다. 번역·분석은 Gemini 키(또는 OpenRouter)가 없으면 OpenAI 텍스트 모델로 대체됩니다.
+              키는 하나 이상 입력하면 됩니다. Gemini/OpenAI/Claude 키가 있으면 해당 모델은 직접 API를 우선 사용하고,
+              없으면 OpenRouter 키로 호출합니다. 번역·분석은 Gemini 키(또는 OpenRouter)가 없으면 OpenAI·Claude 텍스트 모델로 대체됩니다.
+              Claude 분석 모델은 분석 패널의 모델 선택에서 고를 수 있습니다.
             </p>
           </div>
 

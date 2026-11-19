@@ -1,7 +1,7 @@
 // OpenRouter 통합 API 클라이언트
 // - 텍스트/비전: POST /api/v1/chat/completions (OpenAI 호환)
 // - 이미지 생성: POST /api/v1/images (전용 Image API, input_references 지원)
-// Gemini/OpenAI 직접 키가 설정돼 있으면 해당 제공사 모델은 직접 API 로 보내고(providerKeys),
+// Gemini/OpenAI/Anthropic 직접 키가 설정돼 있으면 해당 제공사 모델은 직접 API 로 보내고(providerKeys),
 // 없으면 OpenRouter 통합 키로 보낸다.
 
 import { logger } from '../logger';
@@ -13,6 +13,7 @@ import {
   type DirectProvider,
 } from './providerKeys';
 import { DIRECT_TEXT_FALLBACK_MODEL, directChatEndpoint, generateImagesDirect } from './directProviders';
+import { anthropicChatComplete } from './anthropicClient';
 
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
@@ -66,30 +67,41 @@ export function toImagePart(imageDataUrlOrBase64: string): ChatImagePart {
  * 텍스트 응답을 반환하는 chat completions 호출.
  * finish_reason이 length/content_filter면 상황을 알 수 있는 에러를 던진다.
  */
-interface ChatRoute {
-  url: string;
-  headers: Record<string, string>;
-  model: string;
-  maxTokensField: 'max_tokens' | 'max_completion_tokens';
-}
+type ChatRoute =
+  | {
+      kind: 'openai-compatible';
+      url: string;
+      headers: Record<string, string>;
+      model: string;
+      maxTokensField: 'max_tokens' | 'max_completion_tokens';
+    }
+  | { kind: 'anthropic'; apiKey: string; model: string };
 
 /**
  * 텍스트 요청 경로 결정: 원 제공사 직접 키 → OpenRouter → 다른 직접 키(대체 모델).
  * 텍스트 모델은 대체해도 기능이 같으므로 마지막 단계까지 허용한다.
+ * 단, 사용자가 Claude 모델을 직접 고른 경우는 다른 모델로 몰래 바꾸지 않고 에러를 낸다.
  */
 function resolveChatRoute(apiKey: string, model: string): ChatRoute {
   const keys = getProviderKeys();
   const provider = providerOfModel(model);
   const direct = (p: DirectProvider, directModel: string): ChatRoute => ({
+    kind: 'openai-compatible',
     ...directChatEndpoint(p, keys[p]),
     model: directModel,
   });
 
-  if (provider && keys[provider]) return direct(provider, toDirectModelId(model));
+  if (provider === 'anthropic' && keys.anthropic) {
+    return { kind: 'anthropic', apiKey: keys.anthropic, model: toDirectModelId(model) };
+  }
+  if (provider && provider !== 'anthropic' && keys[provider]) {
+    return direct(provider, toDirectModelId(model));
+  }
 
   const openrouterKey = resolveOpenRouterKey(apiKey) || keys.openrouter;
   if (openrouterKey) {
     return {
+      kind: 'openai-compatible',
       url: `${OPENROUTER_BASE_URL}/chat/completions`,
       headers: openrouterHeaders(openrouterKey),
       model,
@@ -97,14 +109,25 @@ function resolveChatRoute(apiKey: string, model: string): ChatRoute {
     };
   }
 
-  const fallback: DirectProvider | null = keys.gemini ? 'gemini' : keys.openai ? 'openai' : null;
-  if (fallback) return direct(fallback, DIRECT_TEXT_FALLBACK_MODEL[fallback]);
+  if (provider === 'anthropic') {
+    throw new Error('Claude 모델을 쓰려면 설정에서 Anthropic(Claude) 또는 OpenRouter API 키를 입력하세요.');
+  }
 
-  throw new Error('API Key가 비어있습니다. 설정에서 OpenRouter·Gemini·OpenAI 중 하나의 키를 입력하세요.');
+  if (keys.gemini) return direct('gemini', DIRECT_TEXT_FALLBACK_MODEL.gemini);
+  if (keys.openai) return direct('openai', DIRECT_TEXT_FALLBACK_MODEL.openai);
+  if (keys.anthropic) return { kind: 'anthropic', apiKey: keys.anthropic, model: keys.anthropicTextModel };
+
+  throw new Error(
+    'API Key가 비어있습니다. 설정에서 OpenRouter·Gemini·OpenAI·Anthropic 중 하나의 키를 입력하세요.'
+  );
 }
 
 export async function chatComplete(apiKey: string, params: ChatCompleteParams): Promise<string> {
   const route = resolveChatRoute(apiKey, params.model);
+
+  if (route.kind === 'anthropic') {
+    return anthropicChatComplete(route.apiKey, { ...params, model: route.model });
+  }
 
   const body: Record<string, unknown> = {
     model: route.model,
@@ -218,6 +241,9 @@ export async function generateImagesViaOpenRouter(
   // 원 제공사 직접 키가 있으면 직접 API 로 보낸다 (이미지 모델은 대체 불가)
   const keys = getProviderKeys();
   const provider = providerOfModel(request.model);
+  if (provider === 'anthropic') {
+    throw new Error('Claude 모델은 이미지 생성을 지원하지 않습니다.');
+  }
   if (provider && keys[provider]) {
     const direct = await generateImagesDirect(provider, keys[provider], {
       ...request,

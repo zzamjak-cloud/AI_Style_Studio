@@ -1,5 +1,5 @@
 import { Store } from '@tauri-apps/plugin-store';
-import type { ProviderKeys } from './api/providerKeys';
+import { EMPTY_PROVIDER_KEYS, normalizeClaudeTextModel, type ProviderKeys } from './api/providerKeys';
 import { save, open } from '@tauri-apps/plugin-dialog';
 import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs';
 import { Session } from '../types/session';
@@ -48,6 +48,8 @@ export async function saveProviderApiKeys(keys: ProviderKeys): Promise<void> {
     ['openrouter_api_key', keys.openrouter.trim()],
     ['gemini_api_key', keys.gemini.trim()],
     ['openai_api_key', keys.openai.trim()],
+    ['anthropic_api_key', keys.anthropic.trim()],
+    ['anthropic_text_model', normalizeClaudeTextModel(keys.anthropicTextModel)],
   ];
   for (const [storeKey, value] of entries) {
     if (value) await store.set(storeKey, value);
@@ -69,10 +71,12 @@ export async function loadProviderApiKeys(): Promise<ProviderKeys> {
       openrouter: await read('openrouter_api_key'),
       gemini: await read('gemini_api_key'),
       openai: await read('openai_api_key'),
+      anthropic: await read('anthropic_api_key'),
+      anthropicTextModel: normalizeClaudeTextModel(await read('anthropic_text_model')),
     };
   } catch (error) {
     logger.error('API 키 로드 오류:', error);
-    return { openrouter: '', gemini: '', openai: '' };
+    return { ...EMPTY_PROVIDER_KEYS };
   }
 }
 

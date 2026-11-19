@@ -204,11 +204,15 @@ export const GEMINI_FLASH_TEXT_MODEL = 'google/gemini-3.8-flash';
  * 참조 이미지 분석에 사용 가능한 모델 목록 (OpenRouter 슬러그)
  * - flash: 빠르고 저렴, 대부분의 분석에 충분
  * - pro: 추론 깊이가 필요한 다중 이미지·복잡한 구조화 분석용 (고비용)
+ * - claude: Anthropic Claude 비전 분석
  */
 export const ANALYSIS_MODELS = [
   { id: GEMINI_FLASH_TEXT_MODEL, label: 'Gemini 3.8 Flash', description: '최신 Flash · 기본' },
   { id: 'google/gemini-3.7-flash', label: 'Gemini 3.7 Flash', description: '이전 Flash · 안정' },
   { id: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', description: '정밀 분석 · 고비용' },
+  // Claude: Anthropic 키가 있으면 직접 API, 없으면 OpenRouter 로 호출 (슬러그는 OpenRouter 표기)
+  { id: 'anthropic/claude-opus-5.5', label: 'Claude Opus 5.5', description: 'Claude 정밀 분석 · 고비용' },
+  { id: 'anthropic/claude-sonnet-5.5', label: 'Claude Sonnet 5.5', description: 'Claude 균형형' },
 ] as const;
 
 export type AnalysisModelId = (typeof ANALYSIS_MODELS)[number]['id'];

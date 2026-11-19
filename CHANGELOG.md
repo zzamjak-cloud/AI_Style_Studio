@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Anthropic(Claude) API Key 입력**: 설정에서 Claude API Key를 입력할 수 있습니다.
+- **Claude로 참조 이미지 분석**: 분석 모델 목록에 Claude Opus 5.5·Claude Sonnet 5.5가 추가되었습니다. Claude 키가 있으면 Claude API로 직접 호출하고, 없으면 OpenRouter 키로 호출합니다. 두 키가 모두 없으면 다른 모델로 바꾸지 않고 안내 메시지를 띄웁니다.
+  - 안전 필터 오탐으로 거절되면 서버가 다른 Claude 모델로 자동 재시도합니다(Haiku 제외).
+- **Claude 텍스트 모델 선택**: Claude 키만 있을 때 번역·요약에 쓸 모델(Opus 5.5·Sonnet 5.5·Haiku 5.5)을 설정에서 고를 수 있습니다.
+- **MCP 서버**: 앱 설정의 Claude 키와 텍스트 모델 설정을 함께 읽습니다. `ss_info`의 `api_keys`에 `anthropic`이 추가되었습니다.
+
 ## [1.2.0] - 2026-11-12
 
 ### Added

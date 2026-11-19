@@ -43,7 +43,7 @@ Gemini Vision 에 넘길 **분석 프롬프트 생성**(`analysisPrompt.ts`), **
 7. **결과 검증**(`:319`~`363`): `style`/`character`/`composition` 존재 + `negative_prompt !== undefined` 필수. 캐릭터 신규 필드(`body_proportions`/`limb_proportions`/`torso_shape`/`hand_style`/`feet_style`) 누락 시 `'not specified'` 기본값 채움.
 8. **콜백**: 성공 `onComplete(result)`, 실패 `onError(Error)`. 진행 메시지 `onProgress`.
 
-- 모델 목록은 `types/constants.ts`의 `ANALYSIS_MODELS`, 기본값은 `DEFAULT_ANALYSIS_MODEL`(`gemini-3.8-flash`). API 키는 URL 쿼리스트링으로 전달, 로그에선 마스킹.
+- 모델 목록은 `types/constants.ts`의 `ANALYSIS_MODELS`(Gemini 3종 + **Claude Opus 5.5·Sonnet 5.5** — 슬러그는 OpenRouter 표기 `anthropic/claude-*-5.5`, Anthropic 키가 있으면 `anthropicClient.ts` 직접 호출 → `wiki/api/overview.md`), 기본값은 `DEFAULT_ANALYSIS_MODEL`(`gemini-3.8-flash`). API 키는 URL 쿼리스트링으로 전달, 로그에선 마스킹.
 - `analyzeIllustrationCharacter`(`:379`)·`analyzeIllustrationBackground`(`:479`)는 같은 패턴의 축약판(파싱 클린업 동일, finishReason 은 SAFETY 만 체크). 반환은 `{analysis, negativePrompt}`.
 
 ## 분석 비교 (`analysisComparator.ts`)

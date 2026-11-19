@@ -29,6 +29,7 @@
     "mcp:typecheck": "tsc --noEmit -p mcp/tsconfig.json"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.10.0",
     "@google/generative-ai": "^0.24.1",
     "@tauri-apps/api": "^2.9.1",
     "@tauri-apps/plugin-dialog": "^2.4.2",
