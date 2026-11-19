@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-20
+
 ### Added
 
 - **Anthropic(Claude) API Key 입력**: 설정에서 Claude API Key를 입력할 수 있습니다.
