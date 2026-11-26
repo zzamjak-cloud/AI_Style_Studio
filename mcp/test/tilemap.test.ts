@@ -171,7 +171,7 @@ describe('(b) 합성기·내보내기', () => {
         planTilemapBatch(join(root, 'appdata'), { dest_dir: join(root, 'out'), tasks, options } as never);
       await expect(bad([{ mode: 'ruletile' }])).rejects.toThrow('최소 하나');
       await expect(bad([{ mode: 'variation', edge_style: 'wavy' }])).rejects.toThrow('ruletile 전용');
-      await expect(bad([{ mode: 'variation' }], { model: 'google/gemini-3.1-flash-image-preview' })).rejects.toThrow();
+      await expect(bad([{ mode: 'variation' }], { model: 'google/gemini-3.1-flash-image' })).rejects.toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

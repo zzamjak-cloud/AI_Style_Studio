@@ -21,8 +21,9 @@ ImageGenerationModel =
   | 'openai/gpt-image-2.5-sunburst'          // 덕테이프 2.5 선버스트 (available — 정밀 우선)
   | 'openai/gpt-image-2.6-flare'             // 덕테이프 2.6 플레어 (available — 2.5 대비 약 50% 빠름)
   | 'openai/gpt-image-2.6-sunburst'          // 덕테이프 2.6 선버스트 (available — 편집 간 일관성)
-  | 'google/gemini-3-pro-image-preview'      // 나노바나나 프로
-  | 'google/gemini-3.1-flash-image-preview'  // 나노바나나2
+  | 'google/gemini-nano-banana-2.1'         // 나노바나나 2.1
+  | 'google/gemini-3-pro-image'              // 나노바나나 프로
+  | 'google/gemini-3.1-flash-image'          // 나노바나나2
   | 'google/gemini-3.1-flash-lite-image'     // 나노바나나 2 라이트 (1K 전용)
 
 ImageModelDefinition = {
@@ -88,7 +89,7 @@ seed·temperature·topK·topP도 이 모델들의 `supported_parameters`에 없�
 ### 기타
 
 - `getAvailableImageModels()`: 통합 키 하나로 전 모델 사용 가능 — provider 필터는 없고 `IMAGE_MODELS.filter(availability === 'available')`만 남긴다(`pending`만 걸러짐, 현재 카탈로그엔 없음).
-- `normalizeImageModelId(id)`: 레거시 ID(`gemini-3-pro-image-preview` 등) → 현재 슬러그. 카탈로그에 있는 ID(`pending` 포함)는 그대로 통과시킨다 — 승격 로직은 없다.
+- `normalizeImageModelId(id)`: 레거시 ID(`gemini-3-pro-image-preview`·`google/…-preview` 등) → 현재 정식 슬러그. MCP `resolveModel`은 폴백 없는 `resolveLegacyModelId`를 쓴다. 카탈로그에 있는 ID(`pending` 포함)는 그대로 통과시킨다 — 승격 로직은 없다.
 - `supportsTransparentBackground(modelId)`: `getImageModelDefinition(modelId).supports.transparentBackground`의 얇은 래퍼.
 - `normalizeImageQuality(modelId, quality)`: 모델이 지원하지 않는 품질 티어가 저장돼 있으면 `medium`(없으면 첫 값)으로 되돌린다. 적용처: `useImageGenerator`(요청 직전)·`useChatSession`(설정 갱신)·`useChatImageGeneration`(요청 직전)·`ConceptPanel`(히스토리 복원).
 - `DEFAULT_IMAGE_MODEL = 'openai/gpt-image-2'` — 나노바나나 프로 → 덕테이프(gpt-image-2, v0.8.0) 순으로 바뀌었다. 2026-09-12에 잠깐 2.5 선버스트로 옮겼다가 같은 날 되돌렸다(아래 참조). 이 상수 하나가 생성·대화형·컨셉 새 세션의 초기값과 `normalizeImageModelId`의 폴백을 함께 정한다. 기존 세션은 저장된 모델을 그대로 유지한다.

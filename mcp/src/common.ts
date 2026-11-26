@@ -13,6 +13,7 @@ import {
   DEFAULT_IMAGE_MODEL,
   IMAGE_MODELS,
   normalizeImageQuality,
+  resolveLegacyModelId,
   type ImageModelDefinition,
   type ImageQualityOption,
   type ImageSizeOption,
@@ -34,7 +35,8 @@ export interface ModelChecks {
 }
 
 export function resolveModel(modelId: string | undefined, allowed?: (m: ImageModelDefinition) => boolean): ModelChecks {
-  const id = modelId ?? DEFAULT_IMAGE_MODEL;
+  // 예전 슬러그(-preview 등)로 호출해도 현재 모델로 이어지게 한다. 모르는 ID는 그대로 둬서 아래에서 거부한다.
+  const id = modelId === undefined ? DEFAULT_IMAGE_MODEL : resolveLegacyModelId(modelId);
   const model = IMAGE_MODELS.find((m) => m.id === id && m.availability === 'available');
   if (!model) throw new Error(`알 수 없는 모델입니다: ${id}. ss_models 로 목록을 확인하세요.`);
   if (allowed && !allowed(model)) throw new Error(`이 도구에서는 ${model.id} 모델을 쓸 수 없습니다.`);

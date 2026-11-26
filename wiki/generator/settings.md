@@ -21,8 +21,9 @@
 | `openai/gpt-image-2.5-sunburst` | 덕테이프 2.5 선버스트 | openai | 8종 | — | low/medium/high/xhigh/max | 16 | 10 | ✓ |
 | `openai/gpt-image-2.6-flare` | 덕테이프 2.6 플레어 | openai | 8종 | — | low/medium/high/xhigh/max | 16 | 10 | ✓ |
 | `openai/gpt-image-2.6-sunburst` | 덕테이프 2.6 선버스트 | openai | 8종 | — | low/medium/high/xhigh/max | 16 | 10 | ✓ |
-| `google/gemini-3-pro-image-preview` | 나노바나나 프로 | gemini | 10종 | 1K/2K/4K | medium | 14 | 1 | — |
-| `google/gemini-3.1-flash-image-preview` | 나노바나나2 | gemini | 10종 | 1K/2K/4K | medium | 14 | 1 | — |
+| `google/gemini-nano-banana-2.1` | 나노바나나 2.1 | gemini | 10종 | 1K/2K/4K | medium | 14 | 1 | — |
+| `google/gemini-3-pro-image` | 나노바나나 프로 | gemini | 10종 | 1K/2K/4K | medium | 14 | 1 | — |
+| `google/gemini-3.1-flash-image` | 나노바나나2 | gemini | 10종 | 1K/2K/4K | medium | 14 | 1 | — |
 | `google/gemini-3.1-flash-lite-image` | 나노바나나 2 라이트 | gemini | 10종 | 1K | medium | 14 | 1 | — |
 
 - **8종 모두 `availability: 'available'`** — `ModelAvailability`는 `'available'|'pending'` 두 값뿐이고 현재 카탈로그에 `pending`은 없다. 2.5 두 티어는 여전히 드롭다운에서 사용자가 직접 고를 수 있지만(품질 xhigh/max·투명 배경 지원), 실제 생성 테스트(타일맵 변형)에서 재질 스케일·변형 랜덤성 회귀가 확인돼 기본값에서는 제외됐다 — 근거는 `tilemap/overview.md`.

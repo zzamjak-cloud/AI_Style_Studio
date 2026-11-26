@@ -10,6 +10,8 @@
 //   gemini-3-pro-image      aspect_ratio 10종 · resolution 1K/2K/4K · n 1 고정 · input_references 0~14
 //   gemini-3.1-flash-image  aspect_ratio 14종(1:4·1:8·4:1·8:1 포함) · resolution 512/1K/2K/4K · n 1 · refs 0~14
 //   gemini-3.1-flash-lite   aspect_ratio 14종 · resolution 1K · n 1 · refs 0~14
+// 2026-11-26 실측: gemini-nano-banana-2.1  aspect_ratio 14종 · resolution 1K/2K/4K · n 1 · refs 0~14
+//   프로·나노바나나2는 정식판(-preview 없음)으로 옮겼다. Gemini 직접 API ID도 접두사만 뗀 같은 이름이다.
 //
 // **마스크/인페인팅은 어떤 모델도 지원하지 않는다.** OpenRouter Image API에는 mask 필드가 없고
 // `/api/v1/images/edits` 엔드포인트 자체가 존재하지 않는다(2026-09-09 확인). 부분 편집을 어떻게
@@ -72,8 +74,9 @@ export type AnnotationMode = 'composite' | 'coordinates';
 export type ModelAvailability = 'available' | 'pending';
 
 export type ImageGenerationModel =
-  | 'google/gemini-3-pro-image-preview'
-  | 'google/gemini-3.1-flash-image-preview'
+  | 'google/gemini-nano-banana-2.1'
+  | 'google/gemini-3-pro-image'
+  | 'google/gemini-3.1-flash-image'
   | 'google/gemini-3.1-flash-lite-image'
   | 'openai/gpt-image-2'
   | 'openai/gpt-image-2.5-flare'
@@ -82,8 +85,9 @@ export type ImageGenerationModel =
   | 'openai/gpt-image-2.6-sunburst';
 
 export type GeminiImageGenerationModel =
-  | 'google/gemini-3-pro-image-preview'
-  | 'google/gemini-3.1-flash-image-preview'
+  | 'google/gemini-nano-banana-2.1'
+  | 'google/gemini-3-pro-image'
+  | 'google/gemini-3.1-flash-image'
   | 'google/gemini-3.1-flash-lite-image';
 
 export interface ImageModelDefinition {
@@ -215,7 +219,22 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
     },
   },
   {
-    id: 'google/gemini-3-pro-image-preview',
+    id: 'google/gemini-nano-banana-2.1',
+    label: '나노바나나 2.1',
+    provider: 'gemini',
+    availability: 'available',
+    annotationMode: 'coordinates',
+    supports: {
+      aspectRatios: GEMINI_ASPECT_RATIOS,
+      imageSizes: ['1K', '2K', '4K'],
+      qualities: ['medium'],
+      maxReferenceImages: 14,
+      maxImagesPerRequest: 1,
+      transparentBackground: false,
+    },
+  },
+  {
+    id: 'google/gemini-3-pro-image',
     label: '나노바나나 프로',
     provider: 'gemini',
     availability: 'available',
@@ -230,7 +249,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
     },
   },
   {
-    id: 'google/gemini-3.1-flash-image-preview',
+    id: 'google/gemini-3.1-flash-image',
     label: '나노바나나2',
     provider: 'gemini',
     availability: 'available',
@@ -302,10 +321,15 @@ export const DEFAULT_IMAGE_MODEL: ImageGenerationModel = 'openai/gpt-image-2';
  */
 export const TILEMAP_FIXED_IMAGE_MODEL: ImageGenerationModel = 'openai/gpt-image-2';
 
-/** OpenRouter 이전(v0.5.x 이하)에 저장된 모델 ID → 현재 슬러그 매핑 */
+/**
+ * 예전에 저장된 모델 ID → 현재 슬러그 매핑.
+ * 접두사 없는 ID는 OpenRouter 이전(v0.5.x 이하), `-preview` 슬러그는 정식판 전환 이전 세션 값이다.
+ */
 const LEGACY_MODEL_ID_MAP: Record<string, ImageGenerationModel> = {
-  'gemini-3-pro-image-preview': 'google/gemini-3-pro-image-preview',
-  'gemini-3.1-flash-image-preview': 'google/gemini-3.1-flash-image-preview',
+  'gemini-3-pro-image-preview': 'google/gemini-3-pro-image',
+  'gemini-3.1-flash-image-preview': 'google/gemini-3.1-flash-image',
+  'google/gemini-3-pro-image-preview': 'google/gemini-3-pro-image',
+  'google/gemini-3.1-flash-image-preview': 'google/gemini-3.1-flash-image',
   'gemini-3.1-flash-lite-image': 'google/gemini-3.1-flash-lite-image',
   'gpt-image-2': 'openai/gpt-image-2',
 };
@@ -316,6 +340,11 @@ const LEGACY_MODEL_ID_MAP: Record<string, ImageGenerationModel> = {
  * `pending` 모델도 통과시킨다 — 등재됐다가 되돌리는 순서에서 사용자가 고른 모델이 조용히
  * 기본값으로 바뀌지 않도록 하기 위해서다.
  */
+/** 레거시 ID면 현재 슬러그로, 아니면 입력을 그대로 돌려준다 (기본값 폴백 없음 — MCP 입력 검증용) */
+export function resolveLegacyModelId(modelId: string): string {
+  return LEGACY_MODEL_ID_MAP[modelId] ?? modelId;
+}
+
 export function normalizeImageModelId(modelId: string | undefined): ImageGenerationModel {
   if (!modelId) return DEFAULT_IMAGE_MODEL;
   if (IMAGE_MODELS.some((model) => model.id === modelId)) {

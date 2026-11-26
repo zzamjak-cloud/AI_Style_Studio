@@ -153,7 +153,7 @@ describe('배치 계획', () => {
   };
 
   test('count 가 커도 계획 단계에서 즉시 끊는다 (서버 폭주 방지)', async () => {
-    await expect(plan({ tasks: [{ prompt: 'x', count: 1e9 }], options: { model: 'google/gemini-3.1-flash-image-preview' } })).rejects.toThrow(
+    await expect(plan({ tasks: [{ prompt: 'x', count: 1e9 }], options: { model: 'google/gemini-3.1-flash-image' } })).rejects.toThrow(
       String(PLAN_HARD_LIMIT)
     );
   });
